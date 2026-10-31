@@ -1,10 +1,13 @@
 {
   "Version": 1,
-  "WorkspaceRootPath": "C:\\Users\\annaz\\source\\repos\\fizyka-lab01\\",
+  "WorkspaceRootPath": "C:\\Users\\annaz\\Desktop\\AngryBirds\\",
   "Documents": [
     {
-      "AbsoluteMoniker": "D:0:0:{0C88C426-67B9-4BD7-99D4-207BED41AC4C}|fizyka-lab01.vcxproj|C:\\Users\\annaz\\source\\repos\\fizyka-lab01\\fizyka-lab01.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
-      "RelativeMoniker": "D:0:0:{0C88C426-67B9-4BD7-99D4-207BED41AC4C}|fizyka-lab01.vcxproj|solutionrelative:fizyka-lab01.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+      "AbsoluteMoniker": "D:0:0:{0C88C426-67B9-4BD7-99D4-207BED41AC4C}|fizyka-lab01.vcxproj|C:\\Users\\annaz\\Desktop\\AngryBirds\\AngryBirds.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{0C88C426-67B9-4BD7-99D4-207BED41AC4C}|fizyka-lab01.vcxproj|solutionrelative:AngryBirds.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{0C88C426-67B9-4BD7-99D4-207BED41AC4C}|fizyka-lab01.vcxproj|C:\\Users\\annaz\\Downloads\\stb_truetype.h||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
     }
   ],
   "DocumentGroupContainers": [
@@ -14,7 +17,7 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 3,
+          "SelectedChildIndex": 4,
           "Children": [
             {
               "$type": "Bookmark",
@@ -30,13 +33,25 @@
             },
             {
               "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "stb_truetype.h",
+              "DocumentMoniker": "C:\\Users\\annaz\\Downloads\\stb_truetype.h",
+              "RelativeDocumentMoniker": "..\\..\\Downloads\\stb_truetype.h",
+              "ToolTip": "C:\\Users\\annaz\\Downloads\\stb_truetype.h",
+              "RelativeToolTip": "..\\..\\Downloads\\stb_truetype.h",
+              "ViewState": "AQIAAAgBAAAAAAAAAAAAACABAAAkAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-10-31T12:17:18.25Z"
+            },
+            {
+              "$type": "Document",
               "DocumentIndex": 0,
-              "Title": "fizyka-lab01.cpp",
-              "DocumentMoniker": "C:\\Users\\annaz\\source\\repos\\fizyka-lab01\\fizyka-lab01.cpp",
-              "RelativeDocumentMoniker": "fizyka-lab01.cpp",
-              "ToolTip": "C:\\Users\\annaz\\source\\repos\\fizyka-lab01\\fizyka-lab01.cpp",
-              "RelativeToolTip": "fizyka-lab01.cpp",
-              "ViewState": "AQIAAAAAAAAAAAAAAAAAAFEAAAAUAAAA",
+              "Title": "AngryBirds.cpp",
+              "DocumentMoniker": "C:\\Users\\annaz\\Desktop\\AngryBirds\\AngryBirds.cpp",
+              "RelativeDocumentMoniker": "AngryBirds.cpp",
+              "ToolTip": "C:\\Users\\annaz\\Desktop\\AngryBirds\\AngryBirds.cpp",
+              "RelativeToolTip": "AngryBirds.cpp",
+              "ViewState": "AQIAAEgDAAAAAAAAAAAQwFQDAAAQAAAA",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000677|",
               "WhenOpened": "2026-10-27T17:41:09.96Z",
               "EditorCaption": ""
