@@ -1,2 +1,1 @@
-"# fizyka-labki" 
 "# Angry-birds" 
