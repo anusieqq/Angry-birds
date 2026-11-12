@@ -7,11 +7,9 @@
 // Zasady spójności fizycznej użyte w całym kodzie:
 //  - masa każdego ciała = gęstość materiału * objętość (nigdzie nie ustawiamy masy "z ręki"),
 //  - obrażenia = impuls kontaktowy [N*s] zgłoszony przez PhysX (wybuch: impuls J),
-//  - rozpad zachowuje pęd całkowity; moment pędu jest przybliżony (fragmenty dzielą
-//    bryłę na skończoną liczbę kawałków, więc część orbitalna L "ginie" w podziale -
-//    dokładne zachowanie L wymagałoby nadania fragmentom dodatkowych prędkości kątowych
-//    lub kompensacji orbitalnej). Ciała z przesuniętym COM są oznaczone jako nierozpadowe
-//    (setCom), bo podział wokół środka geometrycznego złamałby i tak przybliżone L.
+//  - rozpad zachowuje pęd całkowity; moment pędu jest kompensowany przez nadanie
+//    fragmentom dodatkowej prędkości kątowej (patrz Fizyka::shatter).
+//  - ciała z przesuniętym COM są oznaczone jako nierozpadowe (setCom).
 //  - podział ptaka BLUE zachowuje pęd (3 równe masy, symetryczne odchylenie boczne),
 //  - jedno tłumienie obrotów dla wszystkich ciał, brak innych "sztucznych" tłumień,
 //  - progi obrażeń są kalibrowane dla stałego kroku Dt = 1/60 s.
@@ -29,132 +27,173 @@
 #include <vector>
 using namespace physx;
 
-// =============================================================
-// Konfiguracja gry
-// =============================================================
-namespace cfg {
-    constexpr int WindowW = 1280, WindowH = 720;
-    constexpr float ViewW = 32.f, ViewH = 18.f;
-    constexpr float Pi = 3.14159265f;
-    constexpr float Gravity = 9.81f;
-    constexpr float Dt = 1.f / 60.f;
 
-    const PxVec2 Anchor(5.f, 3.2f);
-    constexpr float MaxPull = 3.f;
-    constexpr float SlingStiffness = 80.f;
-    constexpr float GrabRadius = 1.5f;
-    constexpr float ReloadDelay = 1.5f;
-    constexpr float QueueStartX = 3.6f;
-    constexpr float QueueSpacing = 0.65f;
-    constexpr float QueueScale = 0.6f;
+// Centralizuje parametry, które sterują rozmiarem okna i regułami gry.
+class Konfiguracja {
+public:
+    // Rozmiar okna i logiczny rozmiar świata gry, niezależny od rozdzielczości ekranu.
+    static constexpr int WindowW = 1280, WindowH = 720;
+    static constexpr float ViewW = 32.f, ViewH = 18.f;
+    static constexpr float Pi = 3.14159265f;
+    // Grawitacja działa w dół osi Y; Dt jest stałym krokiem symulacji fizyki.
+    static constexpr float Gravity = 9.81f;
+    static constexpr float Dt = 1.f / 60.f;
 
-    constexpr float AngularDamping = 0.1f;
-    constexpr float BirdDensity = 3.f;
-    constexpr float PigDensity = 1.f;
+    // Parametry procy określają punkt zaczepienia, maksymalny naciąg i moc strzału.
+    static constexpr float AnchorX = 5.f;
+    static constexpr float AnchorY = 3.2f;
+    static constexpr float MaxPull = 3.f;
+    static constexpr float SlingStiffness = 80.f;
+    static constexpr float GrabRadius = 1.5f;
+    static constexpr float ReloadDelay = 1.5f;
+    static constexpr float QueueStartX = 3.6f;
+    static constexpr float QueueSpacing = 0.65f;
+    static constexpr float QueueScale = 0.6f;
 
-    constexpr float SettleTime = 1.5f;
-    constexpr float PigDeathImpulse = 3.f;
-    constexpr float BirdLifetime = 12.f;
-    constexpr float WinDelay = 0.8f;
-    constexpr float LoseDelay = 3.f;
-    constexpr float BirdRestSpeed = 0.5f;   // próg prędkości liniowej
-    constexpr float BirdRestAngular = 1.0f; // próg prędkości kątowej [rad/s]
-    constexpr float LoseHardTimeout = BirdLifetime + 2.f;
+    // Współczynniki masy wynikają z gęstości i objętości obiektu.
+    static constexpr float AngularDamping = 0.1f; //tlumienie
+    static constexpr float BirdDensity = 3.f;
+    static constexpr float PigDensity = 1.f;
 
-    constexpr float BombRadius = 6.f;
-    constexpr float BombImpulse = 20.f;
-    constexpr float FlashTime = 0.4f;
+    // Czasy i progi potrzebne przy starcie poziomu oraz rozstrzyganiu wyniku.
+    static constexpr float SettleTime = 1.5f;
+    static constexpr float PigDeathImpulse = 3.f;
+    static constexpr float BirdLifetime = 12.f;
+    static constexpr float WinDelay = 0.8f;
+    static constexpr float LoseDelay = 3.f;
+    static constexpr float BirdRestSpeed = 0.5f;   // próg prędkości liniowej
+    static constexpr float BirdRestAngular = 1.0f; // próg prędkości kątowej [rad/s]
+    static constexpr float LoseHardTimeout = BirdLifetime + 2.f;
 
-    constexpr float YellowBoost = 2.f;
-    constexpr float SplitAngle = 0.25f;
+    // Wybuch przekazuje impuls obiektom w określonym zasięgu.
+    static constexpr float BombRadius = 6.f;
+    static constexpr float BombImpulse = 20.f;
+    static constexpr float FlashTime = 0.4f;
 
-    constexpr int SolverPos = 12, SolverVel = 4;
-}
+    // Parametry umiejętności ptaków specjalnych.
+    static constexpr float YellowBoost = 2.f;
+    static constexpr float SplitAngle = 0.25f;
 
+    // Iteracje solvera poprawiają stabilność stosów i połączeń.
+    static constexpr int SolverPos = 12, SolverVel = 4;
+};
+
+// Kolor RGBA: kanały r, g, b określają barwę, a kanał a przezroczystość.
 struct Color { float r, g, b, a = 1.f; };
 
-namespace color {
-    constexpr Color White{ 1.f, 1.f, 1.f };
-    constexpr Color Black{ 0.f, 0.f, 0.f };
-    constexpr Color Sky{ 0.53f, 0.81f, 0.92f };
-    constexpr Color Ground{ 0.35f, 0.65f, 0.25f };
-    constexpr Color Sling{ 0.40f, 0.25f, 0.10f };
-    constexpr Color SlingBand{ 0.20f, 0.10f, 0.05f };
-    constexpr Color Pig{ 0.30f, 0.75f, 0.30f };
-    constexpr Color Explosion{ 1.f, 0.6f, 0.1f };
-    constexpr Color Hud{ 0.1f, 0.1f, 0.1f };
-    constexpr Color Frame{ 0.30f, 0.22f, 0.15f };
-}
+// Zestawy parametrów używane przez typy ptaków i materiały konstrukcji.
+struct BirdDef { float radius; Color color; };
+struct MatDef { float density, breakImpulse, friction, restitution; Color color; };
 
+// Typ obiektu wybiera jego zachowanie; materiał określa parametry fizyczne bloku.
 enum Type { BLOCK, PIG, BIRD, BALL };
 enum Mat { WOOD, STONE, GLASS, METAL, ALU, NumMats };
+// Rodzaj ptaka wybiera wygląd i umiejętność; State opisuje aktualny ekran gry.
 enum Kind { RED, YELLOW, BLUE, BLACK };
 enum State { MENU, PLAYING, WON, LOST };
 
-struct BirdDef { float radius; Color color; };
-const BirdDef Birds[] = {
-    {0.50f, {0.85f, 0.15f, 0.15f}},
-    {0.42f, {0.97f, 0.85f, 0.10f}},
-    {0.35f, {0.30f, 0.60f, 0.95f}},
-    {0.60f, {0.10f, 0.10f, 0.10f}},
+// Przechowuje katalog kolorów, ptaków i materiałów używany przez grę.
+class Dane {
+public:
+    // Typy opisujące pozycję do rysowania, ciało fizyczne, wybuch i dane rozpadu.
+    struct Pose;
+    struct Body;
+    struct Flash;
+    struct Fracture;
+
+    static constexpr Color White{ 1.f, 1.f, 1.f };
+    static constexpr Color Black{ 0.f, 0.f, 0.f };
+    static constexpr Color Sky{ 0.53f, 0.81f, 0.92f };
+    static constexpr Color Ground{ 0.35f, 0.65f, 0.25f };
+    static constexpr Color Sling{ 0.40f, 0.25f, 0.10f };
+    static constexpr Color SlingBand{ 0.20f, 0.10f, 0.05f };
+    static constexpr Color Pig{ 0.30f, 0.75f, 0.30f };
+    static constexpr Color Explosion{ 1.f, 0.6f, 0.1f };
+    static constexpr Color Hud{ 0.1f, 0.1f, 0.1f };
+    static constexpr Color Frame{ 0.30f, 0.22f, 0.15f };
+    static constexpr float Unbreakable = 1e30f;
+    static const BirdDef Birds[4];
+    static const MatDef Mats[NumMats];
+};
+//promien ,kolor
+const BirdDef Dane::Birds[4] = {
+    {0.50f, {0.85f, 0.15f, 0.15f}}, //czerwony
+    {0.42f, {0.97f, 0.85f, 0.10f}}, //zolty
+    {0.35f, {0.30f, 0.60f, 0.95f}}, //niebieski
+    {0.60f, {0.10f, 0.10f, 0.10f}}, //czarny
+};
+//gestosc, wytrzymalosc, tarcie, sprezytosc, kolor
+const MatDef Dane::Mats[NumMats] = {
+    {0.8f, 9.0f, 0.65f, 0.15f, {0.65f, 0.45f, 0.25f}},  //drewno
+    {2.5f, Dane::Unbreakable, 0.70f, 0.05f, {0.55f, 0.55f, 0.60f}}, //kamien (kula wahadla)
+    {2.5f, 4.0f, 0.55f, 0.10f, {0.70f, 0.90f, 0.95f}}, //szklo
+    {7.8f, Dane::Unbreakable, 0.40f, 0.20f, {0.35f, 0.38f, 0.45f}}, //metal (ogniwa wahadla)
+    {2.7f, Dane::Unbreakable, 0.40f, 0.20f, {0.75f, 0.78f, 0.85f}}, //aluminium
 };
 
-constexpr float Unbreakable = 1e30f;
-
-struct MatDef { float density, breakImpulse, friction, restitution; Color color; };
-const MatDef Mats[NumMats] = {
-    {0.8f, 9.0f, 0.65f, 0.15f, {0.65f, 0.45f, 0.25f}},
-    {2.5f, Unbreakable, 0.70f, 0.05f, {0.55f, 0.55f, 0.60f}},
-    {2.5f, 4.0f, 0.55f, 0.10f, {0.70f, 0.90f, 0.95f}},
-    {7.8f, Unbreakable, 0.40f, 0.20f, {0.35f, 0.38f, 0.45f}},
-    {2.7f, Unbreakable, 0.40f, 0.20f, {0.75f, 0.78f, 0.85f}},
-};
 
 inline float angleZ(const PxQuat& q) { return 2.f * std::atan2(q.z, q.w); }
-struct Pose { float x, y, angle; };
+struct Dane::Pose { float x, y, angle; };
 
-struct Body {
+// Łączy aktora PhysX z danymi potrzebnymi przez zasady gry i renderer.
+struct Dane::Body {
+    // Wskaźnik PhysX wykonuje symulację; pozostałe pola przechowują stan gry.
     PxRigidDynamic* actor = nullptr;
     Type type = BLOCK;
     Mat mat = WOOD;
     Kind kind = RED;
     int id = 0;
-    PxVec2 half{ 0, 0 };
+    PxVec2 half{ 0, 0 }; // Połowa szerokości i wysokości prostokątnego bloku.
     float radius = 0;
-    float impulse = 0;
+    float impulse = 0; // Suma impulsów kontaktowych zebranych w bieżącym kroku.
     float age = 0;
     bool abilityUsed = false;
-    bool dead = false;
-    bool fragment = false;
-    bool noShatter = false;
-    float armLen = 0;
-    float mass = 0.f;
+    bool dead = false;       // Obiekt czeka na usunięcie po zakończeniu kroku fizyki.
+    bool fragment = false;   // Fragment po rozpadzie nie rozpada się ponownie.
+    bool noShatter = false;  // Wyłącza rozpad dla ciał o specjalnym środku masy.
+    float armLen = 0;        // Długość widocznych cięgien, jeśli ciało jest huśtawką.
+    float mass = 0.f;        // Aktualna masa odczytana z PhysX.
 
     PxVec3 prevPos{ 0, 0, 0 };
     float prevAngle = 0.f;
 
     void savePose() {
+        // Zapamiętujemy poprzednią pozę, by renderować płynnie między krokami fizyki.
         PxTransform t = actor->getGlobalPose();
         prevPos = t.p;
         prevAngle = angleZ(t.q);
     }
     Pose pose(float alpha) const {
+        // Interpolujemy pozycję i najkrótszą drogę obrotu do bieżącej pozycji PhysX.
         PxTransform t = actor->getGlobalPose();
-        float da = std::remainder(angleZ(t.q) - prevAngle, 2.f * cfg::Pi);
+        float da = std::remainder(angleZ(t.q) - prevAngle, 2.f * Konfiguracja::Pi);
         return { prevPos.x + (t.p.x - prevPos.x) * alpha, prevPos.y + (t.p.y - prevPos.y) * alpha,
                 prevAngle + da * alpha };
     }
 };
 
-struct Flash { float x, y, t; };
-struct Fracture { PxVec3 pos, v, omega; PxVec2 half; float angle; Mat mat; };
+using Pose = Dane::Pose;
+using Body = Dane::Body;
 
-// =============================================================
-// Warstwa fizyki
-// =============================================================
-namespace phys {
-    constexpr PxU32 BirdGroup = 1;
-    constexpr PxU32 GhostGroup = 2;
+struct Dane::Flash { float x, y, t; };
+struct Dane::Fracture {
+    PxVec3 pos, v, omega;
+    PxVec2 half;
+    float angle;
+    Mat mat;
+    float density;
+    float invInertiaZ;
+};
+using Flash = Dane::Flash;
+using Fracture = Dane::Fracture;
+
+
+class Fizyka {
+public:
+    // Zarządza sceną PhysX, ciałami, materiałami, kolizjami i zawiasami.
+    // BirdGroup pomija kolizje między ptakami, GhostGroup wyłącza kolizje cięgien.
+    static constexpr PxU32 BirdGroup = 1;
+    static constexpr PxU32 GhostGroup = 2;
     PxDefaultAllocator allocator;
     PxDefaultErrorCallback errorCallback;
     PxFoundation* foundation = nullptr;
@@ -167,14 +206,15 @@ namespace phys {
     PxRigidStatic* leftWall = nullptr;
     PxRigidStatic* rightWall = nullptr;
 
-    std::vector<Body*> bodies;
-    int nextId = 1;
+    std::vector<Body*> bodies; // Własność ciał dynamicznych utworzonych dla poziomu.
+    int nextId = 1;            // Unikalny numer pozwala grze odnaleźć wystrzelonego ptaka.
 
     struct Deco { float x, y, hx, hy; Color c; PxRigidStatic* actor; };
     std::vector<Deco> decos;
     std::vector<PxVec2> pivots;
 
-    PxFilterFlags filterShader(PxFilterObjectAttributes, PxFilterData fd0, PxFilterObjectAttributes,
+    // PhysX pyta tę funkcję, czy para kształtów ma brać udział w kolizji.
+    static PxFilterFlags filterShader(PxFilterObjectAttributes, PxFilterData fd0, PxFilterObjectAttributes,
         PxFilterData fd1, PxPairFlags& pairFlags, const void*, PxU32) {
         if (fd0.word0 == GhostGroup || fd1.word0 == GhostGroup)
             return PxFilterFlag::eSUPPRESS;
@@ -188,14 +228,15 @@ namespace phys {
         return PxFilterFlag::eDEFAULT;
     }
 
-    Body* bodyOf(PxActor* a) {
+    // userData łączy aktora PhysX z odpowiadającym mu obiektem logiki gry.
+    static Body* bodyOf(PxActor* a) {
         return (a && a->userData) ? static_cast<Body*>(a->userData) : nullptr;
     }
 
-    constexpr float MinImpactSpeed = 0.5f;
+    static constexpr float MinImpactSpeed = 0.5f;
 
     // Prędkość względna w punkcie kontaktu: v_rel = (v0 + w0 x r0) - (v1 + w1 x r1).
-    PxVec3 relativeVelocityAt(PxActor* a, PxActor* b, const PxVec3& p) {
+    static PxVec3 relativeVelocityAt(PxActor* a, PxActor* b, const PxVec3& p) {
         auto dyn = [](PxActor* x) -> PxRigidDynamic* {
             return (x && x->is<PxRigidDynamic>()) ? static_cast<PxRigidDynamic*>(x) : nullptr;
             };
@@ -211,11 +252,12 @@ namespace phys {
 
     class ContactCallback : public PxSimulationEventCallback {
     public:
+        // Zbiera impulsy z punktów kontaktu; gra wykorzystuje je do obrażeń i rozpadu.
         void onContact(const PxContactPairHeader& header, const PxContactPair* pairs, PxU32 count) override {
             if (!header.actors[0] || !header.actors[1])
                 return;
-            Body* a = bodyOf(header.actors[0]);
-            Body* b = bodyOf(header.actors[1]);
+            Body* a = Fizyka::bodyOf(header.actors[0]);
+            Body* b = Fizyka::bodyOf(header.actors[1]);
             for (PxU32 i = 0; i < count; ++i) {
                 if (pairs[i].flags &
                     (PxContactPairFlag::eREMOVED_SHAPE_0 | PxContactPairFlag::eREMOVED_SHAPE_1))
@@ -228,8 +270,8 @@ namespace phys {
 
                 float sum = 0.f;
                 for (PxU32 j = 0; j < n; ++j) {
-                    PxVec3 vrel = relativeVelocityAt(header.actors[0], header.actors[1], points[j].position);
-                    if (vrel.magnitude() < MinImpactSpeed)
+                    PxVec3 vrel = Fizyka::relativeVelocityAt(header.actors[0], header.actors[1], points[j].position);
+                    if (vrel.magnitude() < Fizyka::MinImpactSpeed)
                         continue;
                     sum += points[j].impulse.magnitude();
                 }
@@ -244,43 +286,63 @@ namespace phys {
         void onAdvance(const PxRigidBody* const*, const PxTransform*, PxU32) override {}
     } contactCallback;
 
-    void init() {
+    // Tworzy fundament, silnik, scenę, materiały i nieruchome granice planszy.
+    bool init() {
         foundation = PxCreateFoundation(PX_PHYSICS_VERSION, allocator, errorCallback);
+        if (!foundation) {
+            std::fprintf(stderr, "PhysX: PxCreateFoundation failed\n");
+            return false;
+        }
         physics = PxCreatePhysics(PX_PHYSICS_VERSION, *foundation, PxTolerancesScale(), true, nullptr);
+        if (!physics) {
+            std::fprintf(stderr, "PhysX: PxCreatePhysics failed\n");
+            return false;
+        }
         PxInitExtensions(*physics, nullptr);
 
         PxSceneDesc desc(physics->getTolerancesScale());
-        desc.gravity = PxVec3(0.f, -cfg::Gravity, 0.f);
+        desc.gravity = PxVec3(0.f, -Konfiguracja::Gravity, 0.f);
         dispatcher = PxDefaultCpuDispatcherCreate(2);
+        if (!dispatcher) {
+            std::fprintf(stderr, "PhysX: PxDefaultCpuDispatcherCreate failed\n");
+            return false;
+        }
         desc.cpuDispatcher = dispatcher;
-        desc.filterShader = filterShader;
+        desc.filterShader = Fizyka::filterShader;
         desc.simulationEventCallback = &contactCallback;
         desc.flags |= PxSceneFlag::eENABLE_CCD;
 #if PX_PHYSICS_VERSION_MAJOR == 4
         desc.flags |= PxSceneFlag::eENABLE_STABILIZATION;
 #endif
         scene = physics->createScene(desc);
+        if (!scene) {
+            std::fprintf(stderr, "PhysX: createScene failed\n");
+            return false;
+        }
 
         creatureMat = physics->createMaterial(0.6f, 0.5f, 0.15f);
         for (int i = 0; i < NumMats; ++i)
-            matPx[i] = physics->createMaterial(Mats[i].friction, Mats[i].friction * 0.85f, Mats[i].restitution);
+            matPx[i] = physics->createMaterial(Dane::Mats[i].friction, Dane::Mats[i].friction * 0.85f, Dane::Mats[i].restitution);
 
         ground = PxCreateStatic(*physics, PxTransform(PxVec3(16.f, -0.5f, 0.f)),
             PxBoxGeometry(20.f, 0.5f, 2.f), *creatureMat);
         scene->addActor(*ground);
         leftWall = PxCreateStatic(*physics, PxTransform(PxVec3(0.1f, 8.f, 0.f)),
             PxBoxGeometry(0.2f, 8.5f, 2.f), *creatureMat);
-        rightWall = PxCreateStatic(*physics, PxTransform(PxVec3(cfg::ViewW - 0.1f, 8.f, 0.f)),
+        rightWall = PxCreateStatic(*physics, PxTransform(PxVec3(Konfiguracja::ViewW - 0.1f, 8.f, 0.f)),
             PxBoxGeometry(0.2f, 8.5f, 2.f), *creatureMat);
         scene->addActor(*leftWall);
         scene->addActor(*rightWall);
+        return true;
     }
 
+    // Zwolnienie aktora PhysX i jego danych gry musi nastąpić razem.
     void releaseBody(Body* b) {
         b->actor->release();
         delete b;
     }
 
+    // Czyści tylko obiekty poziomu, aby można było zbudować go ponownie.
     void clear() {
         for (Body* b : bodies)
             releaseBody(b);
@@ -291,34 +353,37 @@ namespace phys {
         pivots.clear();
     }
 
+    // Zwalnia wszystkie zasoby PhysX po zamknięciu pętli gry.
     void shutdown() {
         clear();
-        leftWall->release();
-        rightWall->release();
-        ground->release();
-        for (int i = 0; i < NumMats; ++i) matPx[i]->release();
-        creatureMat->release();
-        scene->release();
-        dispatcher->release();
+        if (leftWall) leftWall->release();
+        if (rightWall) rightWall->release();
+        if (ground) ground->release();
+        for (int i = 0; i < NumMats; ++i) if (matPx[i]) matPx[i]->release();
+        if (creatureMat) creatureMat->release();
+        if (scene) scene->release();
+        if (dispatcher) dispatcher->release();
         PxCloseExtensions();
-        physics->release();
-        foundation->release();
+        if (physics) physics->release();
+        if (foundation) foundation->release();
     }
 
+    // Wykonuje jeden stały krok PhysX i pobiera zakończone wyniki symulacji.
     void step(float dt) {
         for (Body* b : bodies) b->savePose();
         scene->simulate(dt);
         scene->fetchResults(true);
     }
 
+    // Ustawia wspólne flagi ciała, dodaje je do sceny i zapisuje w rejestrze gry.
     Body* finish(Body* b, PxRigidDynamic* actor) {
         b->actor = actor;
         b->id = nextId++;
         actor->setRigidDynamicLockFlags(PxRigidDynamicLockFlag::eLOCK_LINEAR_Z |
             PxRigidDynamicLockFlag::eLOCK_ANGULAR_X |
             PxRigidDynamicLockFlag::eLOCK_ANGULAR_Y);
-        actor->setAngularDamping(cfg::AngularDamping);
-        actor->setSolverIterationCounts(cfg::SolverPos, cfg::SolverVel);
+        actor->setAngularDamping(Konfiguracja::AngularDamping);
+        actor->setSolverIterationCounts(Konfiguracja::SolverPos, Konfiguracja::SolverVel);
         actor->userData = b;
         b->mass = actor->getMass();
         scene->addActor(*actor);
@@ -327,6 +392,7 @@ namespace phys {
         return b;
     }
 
+    // Tworzy prostokątny blok; hx i hy są jego połowami, a mat wybiera materiał.
     Body* addBox(float x, float y, float hx, float hy, Mat mat, float angle = 0.f, bool fragment = false) {
         auto* b = new Body;
         b->type = BLOCK;
@@ -335,12 +401,13 @@ namespace phys {
         b->fragment = fragment;
         PxTransform pose(PxVec3(x, y, 0.f), PxQuat(angle, PxVec3(0.f, 0.f, 1.f)));
         PxRigidDynamic* actor = PxCreateDynamic(*physics, pose, PxBoxGeometry(hx, hy, 0.5f),
-            *matPx[mat], Mats[mat].density);
+            *matPx[mat], Dane::Mats[mat].density);
         if (fragment)
             actor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_CCD, true);
         return finish(b, actor);
     }
 
+    // Jedno ciało huśtawki zawiera siedzisko i dwa niekolizyjne cięgna.
     Body* addSwing(float x, float y, float hx, float hy, float armLen, Mat mat) {
         auto* b = new Body;
         b->type = BLOCK;
@@ -348,7 +415,7 @@ namespace phys {
         b->half = PxVec2(hx, hy);
         b->armLen = armLen;
         PxRigidDynamic* actor = PxCreateDynamic(*physics, PxTransform(PxVec3(x, y, 0.f)),
-            PxBoxGeometry(hx, hy, 0.5f), *matPx[mat], Mats[mat].density);
+            PxBoxGeometry(hx, hy, 0.5f), *matPx[mat], Dane::Mats[mat].density);
 
         const float L = std::sqrt(hx * hx + armLen * armLen);
         const float phi = std::atan2(hx, armLen);
@@ -359,11 +426,12 @@ namespace phys {
                 PxQuat(side * phi, PxVec3(0.f, 0.f, 1.f))));
             arm->setSimulationFilterData(PxFilterData(GhostGroup, 0, 0, 0));
         }
-        PxRigidBodyExt::updateMassAndInertia(*actor, Mats[mat].density);
+        PxRigidBodyExt::updateMassAndInertia(*actor, Dane::Mats[mat].density);
         actor->setSleepThreshold(0.f);
         return finish(b, actor);
     }
 
+    // Tworzy kulę dla ptaka, świnki albo kuli wahadła i ustawia filtrowanie ptaków.
     Body* addBall(float x, float y, float radius, float density, Type type, Mat mat = STONE) {
         auto* b = new Body;
         b->type = type;
@@ -382,19 +450,21 @@ namespace phys {
         return finish(b, actor);
     }
 
+    // Przesuwa środek masy w pionie i przelicza bezwładność bryły w PhysX.
     void setCom(Body* b, float dy) {
         PxVec3 com(0.f, dy, 0.f);
-        PxRigidBodyExt::updateMassAndInertia(*b->actor, Mats[b->mat].density, &com);
+        PxRigidBodyExt::updateMassAndInertia(*b->actor, Dane::Mats[b->mat].density, &com);
         b->noShatter = true;
         b->mass = b->actor->getMass();
     }
 
+    // Wyszukuje ciało po identyfikatorze zapamiętanym przy jego utworzeniu.
     Body* find(int id) {
         for (Body* b : bodies) if (b->id == id) return b;
         return nullptr;
     }
 
-    // Bezpieczne usuwanie: erase w pętli, bez efektów ubocznych w predykacie remove_if.
+    // Bezpieczne usuwanie
     void removeDead() {
         for (auto it = bodies.begin(); it != bodies.end();) {
             Body* b = *it;
@@ -408,6 +478,7 @@ namespace phys {
         }
     }
 
+    // Dodaje element rysowany; opcjonalnie tworzy dla niego nieruchomą kolizję.
     void addDeco(float x, float y, float hx, float hy, Color c, bool solid) {
         PxRigidStatic* a = nullptr;
         if (solid) {
@@ -417,16 +488,20 @@ namespace phys {
         decos.push_back({ x, y, hx, hy, c, a });
     }
 
+    // Kopiuje pozę i prędkości bloku, by można go było bezpiecznie rozbić później.
     Fracture makeFracture(const Body& b) {
         PxTransform t = b.actor->getGlobalPose();
+        PxVec3 inertia = b.actor->getMassSpaceInertiaTensor();
         return { t.p, b.actor->getLinearVelocity(), b.actor->getAngularVelocity(),
-                b.half, angleZ(t.q), b.mat };
+                b.half, angleZ(t.q), b.mat,
+                Dane::Mats[b.mat].density,
+                (inertia.z > 1e-9f) ? 1.f / inertia.z : 0.f };
     }
 
     // Rozpad: pęd całkowity zachowany (v_i = v + omega x r_i, suma m_i r_i = 0).
-    // Moment pędu przybliżony - fragmenty dzielą bryłę na skończoną siatkę, więc
-    // część orbitalna Sum m_i r_i x (omega x r_i) nie trafia do ich tensora bezwładności.
+    // Moment pędu jest kompensowany przez dodatkową prędkość kątową fragmentów.
     // Dla ciał z przesuniętym COM (setCom) rozpad jest wyłączony - patrz noShatter.
+    // Dzieli blok na siatkę fragmentów, obraca ich środki i zachowuje prędkości.
     void shatter(const Fracture& f) {
         int nx, ny;
         if (f.mat == GLASS) { nx = 2; ny = 2; }
@@ -435,6 +510,22 @@ namespace phys {
         const float hx = f.half.x / nx, hy = f.half.y / ny;
         const float c = std::cos(f.angle), s = std::sin(f.angle);
 
+        const float L0 = (1.f / std::max(f.invInertiaZ, 1e-12f)) * f.omega.z;
+
+        float mSum = 0.f;
+        float mrsq = 0.f;
+        for (int ix = 0; ix < nx; ++ix)
+            for (int iy = 0; iy < ny; ++iy) {
+                float lx = -f.half.x + hx * (2 * ix + 1);
+                float ly = -f.half.y + hy * (2 * iy + 1);
+                float mi = f.density * (2.f * hx) * (2.f * hy);
+                mSum += mi;
+                mrsq += mi * (lx * lx + ly * ly);
+            }
+        const float missingL = L0 - mrsq * f.omega.z;
+        const float Ifrag = mSum * (hx * hx + hy * hy) / 3.f;
+        const float dOmega = (Ifrag > 1e-9f) ? missingL / Ifrag : 0.f;
+
         for (int ix = 0; ix < nx; ++ix)
             for (int iy = 0; iy < ny; ++iy) {
                 float lx = -f.half.x + hx * (2 * ix + 1);
@@ -442,85 +533,103 @@ namespace phys {
                 PxVec3 center(f.pos.x + lx * c - ly * s, f.pos.y + lx * s + ly * c, 0.f);
                 Body* n = addBox(center.x, center.y, hx, hy, f.mat, f.angle, true);
                 n->actor->setLinearVelocity(f.v + f.omega.cross(center - f.pos));
-                n->actor->setAngularVelocity(f.omega);
+                n->actor->setAngularVelocity(PxVec3(0.f, 0.f, f.omega.z + dOmega));
             }
     }
 
-    PxQuat axisZ() { return PxQuat(-0.5f * cfg::Pi, PxVec3(0.f, 1.f, 0.f)); }
+    // Ustawia oś zawiasu wzdłuż osi Z świata, czyli osi obrotu gry 2D.
+    PxQuat axisZ() { return PxQuat(-0.5f * Konfiguracja::Pi, PxVec3(0.f, 1.f, 0.f)); }
     PxTransform frameOn(PxRigidActor* a, const PxTransform& world) {
         return a ? a->getGlobalPose().transformInv(world) : world;
     }
 
+    // Łączy dwa ciała zawiasem w punkcie p; nullptr oznacza zakotwiczenie do świata.
     PxRevoluteJoint* hinge(Body* a, Body* b, PxVec3 p) {
         PxTransform w(p, axisZ());
         PxRigidActor* A = a ? static_cast<PxRigidActor*>(a->actor) : nullptr;
         return PxRevoluteJointCreate(*physics, A, frameOn(A, w), b->actor, frameOn(b->actor, w));
     }
-} // namespace phys
+};
 
-// =============================================================
-// Budowa poziomu
-// =============================================================
-namespace levels {
-    void buildTower(float cx, int floors) {
+constexpr PxU32 Fizyka::BirdGroup;
+constexpr PxU32 Fizyka::GhostGroup;
+constexpr float Fizyka::MinImpactSpeed;
+
+Fizyka fizyka;
+
+
+// Buduje konstrukcje planszy. Metody są statyczne, bo klasa nie przechowuje stanu.
+class Poziomy {
+public:
+    // Wieża ma szklane podpory na dole i świnki na wybranych piętrach.
+    static void buildTower(float cx, int floors) {
         constexpr float hw = 1.5f;
         for (int k = 0; k < floors; ++k) {
+            // Piętro tworzą dwa słupy i półka; dolne słupy są z kruchego szkła.
             float y0 = k * 2.3f;
             Mat pm = (k == 0) ? GLASS : WOOD;
-            phys::addBox(cx - hw, y0 + 0.9f, 0.3f, 0.9f, pm);
-            phys::addBox(cx + hw, y0 + 0.9f, 0.3f, 0.9f, pm);
-            phys::addBox(cx, y0 + 2.05f, 1.9f, 0.25f, WOOD);
+            fizyka.addBox(cx - hw, y0 + 0.9f, 0.3f, 0.9f, pm);
+            fizyka.addBox(cx + hw, y0 + 0.9f, 0.3f, 0.9f, pm);
+            fizyka.addBox(cx, y0 + 2.05f, 1.9f, 0.25f, WOOD);
             if (k == 1 || k == 3)
-                phys::addBall(cx, y0 + 0.5f, 0.5f, cfg::PigDensity, PIG);
+                fizyka.addBall(cx, y0 + 0.5f, 0.5f, Konfiguracja::PigDensity, PIG);
         }
-        phys::addBall(cx, floors * 2.3f + 0.5f, 0.5f, cfg::PigDensity, PIG);
+        fizyka.addBall(cx, floors * 2.3f + 0.5f, 0.5f, Konfiguracja::PigDensity, PIG);
     }
 
-    void buildHut(float cx, Mat pillarMat) {
-        phys::addBox(cx - 0.9f, 0.6f, 0.2f, 0.6f, pillarMat);
-        phys::addBox(cx + 0.9f, 0.6f, 0.2f, 0.6f, pillarMat);
-        phys::addBox(cx, 1.35f, 1.3f, 0.15f, WOOD);
-        phys::addBall(cx, 0.5f, 0.5f, cfg::PigDensity, PIG);
-        phys::addBall(cx, 1.5f + 0.5f, 0.5f, cfg::PigDensity, PIG);
+    // Domek składa się z dwóch podpór, dachu i dwóch świnek.
+    static void buildHut(float cx, Mat pillarMat) {
+        fizyka.addBox(cx - 0.9f, 0.6f, 0.2f, 0.6f, pillarMat);
+        fizyka.addBox(cx + 0.9f, 0.6f, 0.2f, 0.6f, pillarMat);
+        fizyka.addBox(cx, 1.35f, 1.3f, 0.15f, WOOD);
+        fizyka.addBall(cx, 0.5f, 0.5f, Konfiguracja::PigDensity, PIG);
+        fizyka.addBall(cx, 1.5f + 0.5f, 0.5f, Konfiguracja::PigDensity, PIG);
     }
 
-    void buildDominoes(float x0, int n, float spacing) {
+    // Ustawia rząd drewnianych kostek, które przewracają się łańcuchowo.
+    static void buildDominoes(float x0, int n, float spacing) {
         for (int i = 0; i < n; ++i)
-            phys::addBox(x0 + i * spacing, 0.7f, 0.12f, 0.7f, WOOD);
+            fizyka.addBox(x0 + i * spacing, 0.7f, 0.12f, 0.7f, WOOD);
     }
 
-    void buildPendulum(float ax, float ay, int links, float ballR) {
+    // Łączy metalowe ogniwa zawiasami i kończy je ciężką kulą.
+    static void buildPendulum(float ax, float ay, int links, float ballR) {
         const float L = 0.7f;
         Body* prev = nullptr;
         for (int i = 0; i < links; ++i) {
-            Body* link = phys::addBox(ax, ay - 0.5f * L - i * L, 0.09f, 0.5f * L, METAL);
-            phys::hinge(prev, link, PxVec3(ax, ay - i * L, 0.f));
+            // Każde kolejne ogniwo łączy się zawiasem z poprzednim.
+            Body* link = fizyka.addBox(ax, ay - 0.5f * L - i * L, 0.09f, 0.5f * L, METAL);
+            fizyka.hinge(prev, link, PxVec3(ax, ay - i * L, 0.f));
             prev = link;
         }
-        Body* ball = phys::addBall(ax, ay - links * L - ballR, ballR, Mats[STONE].density, BALL, STONE);
-        phys::hinge(prev, ball, PxVec3(ax, ay - links * L, 0.f));
-        phys::pivots.push_back(PxVec2(ax, ay));
-        phys::addDeco(ax, (ay + cfg::ViewH) * 0.5f, 0.08f, (cfg::ViewH - ay) * 0.5f, color::Frame, false);
+        Body* ball = fizyka.addBall(ax, ay - links * L - ballR, ballR, Dane::Mats[STONE].density, BALL, STONE);
+        fizyka.hinge(prev, ball, PxVec3(ax, ay - links * L, 0.f));
+        fizyka.pivots.push_back(PxVec2(ax, ay));
+        fizyka.addDeco(ax, (ay + Konfiguracja::ViewH) * 0.5f, 0.08f, (Konfiguracja::ViewH - ay) * 0.5f, Dane::Frame, false);
     }
 
-    void buildSwing(float cx, float topY, float len) {
-        phys::addDeco(cx, topY + 0.15f, 2.0f, 0.15f, color::Frame, false);
-        phys::addDeco(cx, (topY + 0.3f + cfg::ViewH) * 0.5f, 0.15f,
-            (cfg::ViewH - topY - 0.3f) * 0.5f, color::Frame, false);
+    // Buduje huśtawkę z ruchomym siedziskiem, zawieszeniem i świnką.
+    static void buildSwing(float cx, float topY, float len) {
+        fizyka.addDeco(cx, topY + 0.15f, 2.0f, 0.15f, Dane::Frame, false);
+        fizyka.addDeco(cx, (topY + 0.3f + Konfiguracja::ViewH) * 0.5f, 0.15f,
+            (Konfiguracja::ViewH - topY - 0.3f) * 0.5f, Dane::Frame, false);
 
-        Body* seat = phys::addSwing(cx, topY - len, 1.2f, 0.15f, len, ALU);
-        phys::hinge(nullptr, seat, PxVec3(cx, topY, 0.f));
-        phys::pivots.push_back(PxVec2(cx, topY));
-        phys::addBall(cx, topY - len + 0.15f + 0.5f, 0.5f, cfg::PigDensity, PIG);
+        Body* seat = fizyka.addSwing(cx, topY - len, 1.2f, 0.15f, len, ALU);
+        fizyka.hinge(nullptr, seat, PxVec3(cx, topY, 0.f));
+        fizyka.pivots.push_back(PxVec2(cx, topY));
+        fizyka.addBall(cx, topY - len + 0.15f + 0.5f, 0.5f, Konfiguracja::PigDensity, PIG);
     }
 
-    void buildTopHeavyColumn(float x) {
-        Body* col = phys::addBox(x, 1.5f, 0.4f, 1.5f, WOOD);
-        phys::setCom(col, 0.5f);
-        phys::addBall(x, 3.5f, 0.5f, cfg::PigDensity, PIG);
+    // Umieszcza środek masy wysoko, aby kolumna była niestabilna.
+    static void buildTopHeavyColumn(float x) {
+        Body* col = fizyka.addBox(x, 1.5f, 0.4f, 1.5f, WOOD);
+        fizyka.setCom(col, 0.5f);
+        fizyka.addBall(x, 3.5f, 0.5f, Konfiguracja::PigDensity, PIG);
     }
 
-    std::vector<Kind> build() {
+    // Składa wszystkie elementy poziomu.
+    static void build() {
+        // Elementy układamy od lewej do prawej.
         buildHut(11.7f, GLASS);              // szklany domek
         buildDominoes(17.2f, 5, 0.8f);       // rząd pięciu kostek domina
         buildPendulum(19.4f, 7.6f, 4, 0.6f); // wahadło z kulą
@@ -528,23 +637,27 @@ namespace levels {
         buildSwing(27.2f, 10.0f, 4.0f);      // huśtawka ze świnią
         buildHut(27.2f, WOOD);               // drewniany domek
         buildTopHeavyColumn(30.5f);          // niestabilny słup z balastem
+    }
 
+    // Zwraca kolejność ptaków dla poziomu.
+    static std::vector<Kind> birdQueue() {
         return { RED, BLUE, YELLOW, BLACK, RED, YELLOW, BLACK, BLUE, RED, BLACK };
     }
-} // namespace levels
+};
 
-// =============================================================
-// Grafika 2D
-// =============================================================
-namespace gfx {
-    int fbW = cfg::WindowW, fbH = cfg::WindowH;
-    int vpX = 0, vpY = 0, vpW = cfg::WindowW, vpH = cfg::WindowH;
+
+class Grafika {
+public:
+    // Rysuje kształty 2D i przechowuje wymiary bieżącego obszaru widoku.
+    int fbW = Konfiguracja::WindowW, fbH = Konfiguracja::WindowH;
+    int vpX = 0, vpY = 0, vpW = Konfiguracja::WindowW, vpH = Konfiguracja::WindowH;
     float fracX = 0.f, fracY = 0.f, fracW = 1.f, fracH = 1.f;
 
+    // Dopasowuje stałe proporcje świata do okna i zapisuje obszar gry w pikselach.
     void layout(GLFWwindow* win) {
         glfwGetFramebufferSize(win, &fbW, &fbH);
         if (fbW <= 0 || fbH <= 0) return;
-        const float aspect = cfg::ViewW / cfg::ViewH;
+        const float aspect = Konfiguracja::ViewW / Konfiguracja::ViewH;
         vpW = fbW; vpH = (int)(fbW / aspect);
         if (vpH > fbH) { vpH = fbH; vpW = (int)(fbH * aspect); }
         vpX = (fbW - vpW) / 2; vpY = (fbH - vpH) / 2;
@@ -552,11 +665,13 @@ namespace gfx {
         fracW = (float)vpW / fbW; fracH = (float)vpH / fbH;
     }
 
+    // Włącza przezroczyste mieszanie kolorów używane m.in. przez efekty i tekst.
     void init() {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
 
+    // Czyści ekran, ustawia viewport i mapuje współrzędne świata na widok.
     void beginFrame(GLFWwindow* win) {
         (void)win;
         glDisable(GL_SCISSOR_TEST);
@@ -566,20 +681,21 @@ namespace gfx {
         glViewport(vpX, vpY, vpW, vpH);
         glEnable(GL_SCISSOR_TEST);
         glScissor(vpX, vpY, vpW, vpH);
-        glClearColor(color::Sky.r, color::Sky.g, color::Sky.b, 1.f);
+        glClearColor(Dane::Sky.r, Dane::Sky.g, Dane::Sky.b, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
-        glOrtho(0.0, cfg::ViewW, 0.0, cfg::ViewH, -1.0, 1.0);
+        glOrtho(0.0, Konfiguracja::ViewW, 0.0, Konfiguracja::ViewH, -1.0, 1.0);
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
     }
 
+    // Rysuje prostokąt o środku (x,y), połówkach rozmiaru hx/hy i obrocie angle.
     void quad(float x, float y, float hx, float hy, float angle, Color c) {
         glColor4f(c.r, c.g, c.b, c.a);
         glPushMatrix();
         glTranslatef(x, y, 0.f);
-        glRotatef(angle * 180.f / cfg::Pi, 0.f, 0.f, 1.f);
+        glRotatef(angle * 180.f / Konfiguracja::Pi, 0.f, 0.f, 1.f);
         glScalef(hx, hy, 1.f);
         glBegin(GL_QUADS);
         glVertex2f(-1.f, -1.f); glVertex2f(1.f, -1.f);
@@ -588,6 +704,7 @@ namespace gfx {
         glPopMatrix();
     }
 
+    // Aproksymuje koło wielokątem, aby działało także w starym OpenGL 2.1.
     void circle(float x, float y, float radius, Color c) {
         constexpr int segments = 40;
         glColor4f(c.r, c.g, c.b, c.a);
@@ -597,36 +714,41 @@ namespace gfx {
         glBegin(GL_TRIANGLE_FAN);
         glVertex2f(0.f, 0.f);
         for (int i = 0; i <= segments; ++i) {
-            float t = 2.f * cfg::Pi * i / segments;
+            float t = 2.f * Konfiguracja::Pi * i / segments;
             glVertex2f(std::cos(t), std::sin(t));
         }
         glEnd();
         glPopMatrix();
     }
 
+    // Rysuje odcinek jako wąski, obrócony prostokąt między punktami a i b.
     void line(PxVec2 a, PxVec2 b, float thickness, Color c) {
         PxVec2 d = b - a;
         quad((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f, d.magnitude() * 0.5f, thickness,
             std::atan2(d.y, d.x), c);
     }
-} // namespace gfx
+};
 
-// =============================================================
-// Tekst
-// =============================================================
-namespace text {
-    constexpr char FontPath[] = "PressStart2P-Regular.ttf";
-    constexpr int AtlasSize = 512;
-    constexpr float FontPx = 8.f;
+Grafika grafika;
+
+
+class Tekst {
+public:
+    // Ładuje czcionkę do atlasu tekstury i rysuje napisy na ekranie.
+    const char* FontPath = "PressStart2P-Regular.ttf";
+    const int AtlasSize = 512;
+    const float FontPx = 8.f;
     struct Range { int first, count; };
-    constexpr Range Ranges[] = { {0x20, 95}, {0xA0, 96}, {0x100, 128} };
-    constexpr int NumRanges = 3;
-    stbtt_packedchar glyphs[NumRanges][128];
+    const Range Ranges[3] = { {0x20, 95}, {0xA0, 96}, {0x100, 128} };
+    const int NumRanges = 3;
+    stbtt_packedchar glyphs[3][128];
     GLuint texture = 0;
     bool ready = false;
 
+    // Zaokrągla współrzędne pikseli, aby pikselowa czcionka była ostra.
     float snap(float v) { return std::floor(v + 0.5f); }
 
+    // Wczytuje cały plik czcionki do pamięci; false oznacza brak lub pusty plik.
     bool readFile(const char* path, std::vector<unsigned char>& out) {
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file) return false;
@@ -637,6 +759,7 @@ namespace text {
         return (bool)file.read(reinterpret_cast<char*>(out.data()), size);
     }
 
+    // Pakuje znaki do atlasu alfa, tworzy teksturę OpenGL i oznacza tekst jako gotowy.
     void init() {
         std::vector<unsigned char> ttf;
         if (!readFile(FontPath, ttf)) {
@@ -668,6 +791,7 @@ namespace text {
         ready = true;
     }
 
+    // Odczytuje z UTF-8 jeden znak i zwraca jego kod Unicode.
     int decode(const char*& s) {
         unsigned char c = (unsigned char)*s++;
         if (c < 0x80) return c;
@@ -682,6 +806,7 @@ namespace text {
         return '?';
     }
 
+    // Wyszukuje znak w jednym z zapakowanych zakresów; brakujący znak zastępuje '?'.
     const stbtt_packedchar* glyph(int cp) {
         for (int i = 0; i < NumRanges; ++i)
             if (cp >= Ranges[i].first && cp < Ranges[i].first + Ranges[i].count)
@@ -689,29 +814,32 @@ namespace text {
         return cp == '?' ? nullptr : glyph('?');
     }
 
+    // Przelicza rozmiar tekstu z jednostek świata na całkowitą liczbę pikseli.
     int scale(float size) {
-        float pixelsPerUnit = (float)gfx::vpW / cfg::ViewW;
+        float pixelsPerUnit = (float)grafika.vpW / Konfiguracja::ViewW;
         return std::max(1, (int)std::lround(5.5f * size * pixelsPerUnit / FontPx));
     }
 
+    // Oblicza szerokość napisu, aby można go było dokładnie wyśrodkować.
     float width(const char* s, float size) {
         int sc = scale(size);
         float px = 0.f;
         for (const char* p = s; *p;)
             if (const stbtt_packedchar* g = glyph(decode(p)))
                 px += snap(g->xadvance * sc);
-        return px / gfx::vpW * cfg::ViewW;
+        return px / grafika.vpW * Konfiguracja::ViewW;
     }
 
+    // Rysuje znaki jako teksturowane czworokąty w bieżącym viewportcie.
     void draw(const char* s, float x, float y, float size, Color c) {
         if (!ready) return;
         int sc = scale(size);
-        float px = std::floor(x / cfg::ViewW * gfx::vpW);
-        float py = std::floor((1.f - y / cfg::ViewH) * gfx::vpH);
+        float px = std::floor(x / Konfiguracja::ViewW * grafika.vpW);
+        float py = std::floor((1.f - y / Konfiguracja::ViewH) * grafika.vpH);
         glMatrixMode(GL_PROJECTION);
         glPushMatrix();
         glLoadIdentity();
-        glOrtho(0.0, gfx::vpW, gfx::vpH, 0.0, -1.0, 1.0);
+        glOrtho(0.0, grafika.vpW, grafika.vpH, 0.0, -1.0, 1.0);
         glMatrixMode(GL_MODELVIEW);
         glPushMatrix();
         glLoadIdentity();
@@ -740,59 +868,69 @@ namespace text {
         glMatrixMode(GL_MODELVIEW);
     }
 
+    // Ustawia początek napisu tak, by jego środek wypadł w punkcie (cx, cy).
     void drawCentered(const char* s, float cx, float cy, float size, Color c) {
-        float baselineShift = 3.5f * scale(size) * (cfg::ViewH / (float)gfx::vpH);
+        float baselineShift = 3.5f * scale(size) * (Konfiguracja::ViewH / (float)grafika.vpH);
         draw(s, cx - width(s, size) * 0.5f, cy - baselineShift, size, c);
-    }
-} // namespace text
-
-// =============================================================
-// UI
-// =============================================================
-struct Button {
-    float x, y, w, h;
-    const char* label;
-    bool contains(PxVec2 m) const {
-        return std::fabs(m.x - x) < w * 0.5f && std::fabs(m.y - y) < h * 0.5f;
-    }
-    void draw(bool hover) const {
-        float k = hover ? 1.15f : 1.f;
-        gfx::quad(x + 0.12f, y - 0.12f, w * 0.5f, h * 0.5f, 0.f, { 0.f, 0.f, 0.f, 0.35f });
-        gfx::quad(x, y, w * 0.5f, h * 0.5f, 0.f, { 0.15f, 0.10f, 0.05f });
-        gfx::quad(x, y, w * 0.5f - 0.1f, h * 0.5f - 0.1f, 0.f,
-            { std::min(1.f, 0.90f * k), std::min(1.f, 0.55f * k), std::min(1.f, 0.10f * k) });
-        text::drawCentered(label, x, y, 0.16f, color::White);
     }
 };
 
-namespace ui {
+Tekst tekst;
+
+//UI
+struct Button {
+    // Środek, rozmiar i etykieta pojedynczego przycisku w jednostkach świata.
+    float x, y, w, h;
+    const char* label;
+    // Punkt kursora jest podany w tych samych współrzędnych co pozycja przycisku.
+    bool contains(PxVec2 m) const {
+        return std::fabs(m.x - x) < w * 0.5f && std::fabs(m.y - y) < h * 0.5f;
+    }
+    // Rysuje cień, obramowanie i etykietę; hover lekko rozjaśnia przycisk.
+    void draw(bool hover) const {
+        float k = hover ? 1.15f : 1.f;
+        grafika.quad(x + 0.12f, y - 0.12f, w * 0.5f, h * 0.5f, 0.f, { 0.f, 0.f, 0.f, 0.35f });
+        grafika.quad(x, y, w * 0.5f, h * 0.5f, 0.f, { 0.15f, 0.10f, 0.05f });
+        grafika.quad(x, y, w * 0.5f - 0.1f, h * 0.5f - 0.1f, 0.f,
+            { std::min(1.f, 0.90f * k), std::min(1.f, 0.55f * k), std::min(1.f, 0.10f * k) });
+        tekst.drawCentered(label, x, y, 0.16f, Dane::White);
+    }
+};
+
+class Interfejs {
+public:
+    // Przyciski menu i ekranów końcowych są zebrane w jednym miejscu.
     const Button Play{ 16.f, 8.f, 6.f, 1.8f, "PLAY" };
     const Button Quit{ 16.f, 5.5f, 6.f, 1.8f, "QUIT" };
     const Button Retry{ 12.8f, 6.5f, 6.f, 1.8f, "RETRY" };
     const Button MenuRight{ 19.2f, 6.5f, 6.f, 1.8f, "MENU" };
-}
+};
 
-// =============================================================
-// Wejście
-// =============================================================
-struct Input {
+Interfejs interfejs;
+
+
+class Wejscie {
+public:
+    // Odczytuje mysz i klawiaturę, a także wykrywa nowe naciśnięcia.
     PxVec2 mouse;
     bool lmb = false;
     bool clicked = false;
     bool escPressed = false, rPressed = false;
 
+    // Zamienia położenie kursora z pikseli okna na współrzędne świata gry.
     void poll(GLFWwindow* win) {
         double mx, my;
         int ww, wh;
         glfwGetCursorPos(win, &mx, &my);
         glfwGetWindowSize(win, &ww, &wh);
         float nx = (float)(mx / ww), ny = 1.f - (float)(my / wh);
-        mouse = PxVec2((nx - gfx::fracX) / gfx::fracW * cfg::ViewW,
-            (ny - gfx::fracY) / gfx::fracH * cfg::ViewH);
+        mouse = PxVec2((nx - grafika.fracX) / grafika.fracW * Konfiguracja::ViewW,
+            (ny - grafika.fracY) / grafika.fracH * Konfiguracja::ViewH);
 
         bool l = glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
         bool e = glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS;
         bool r = glfwGetKey(win, GLFW_KEY_R) == GLFW_PRESS;
+        // Porównanie z poprzednią klatką wykrywa samo naciśnięcie, nie przytrzymanie.
         clicked = l && !lmb;
         escPressed = e && !escPrev;
         rPressed = r && !rPrev;
@@ -805,32 +943,33 @@ private:
     bool escPrev = false, rPrev = false;
 };
 
-// =============================================================
-// Klasa gry
-// =============================================================
-class Game {
+
+class Gra {
 public:
+    // Łączy wejście, symulację, warunki końca gry i wyświetlanie sceny.
     bool quit = false;
 
-    void update(const Input& in, double frameDt) {
-        mouse = in.mouse;
+    // Aktualizacja sterowania i symulacji jest osobna od rysowania klatki.
+    // Najpierw zapamiętuje mysz, potem obsługuje zdarzenia i aktualizuje fizykę.
+    void update(const Wejscie& in, double frameDt) {
         handleInput(in);
         simulate(frameDt);
     }
 
     void draw() const {
-        gfx::quad(16.f, -0.5f, 20.f, 0.5f, 0.f, color::Ground);
+        // Scenę rysujemy warstwami: tło, obiekty fizyczne, efekty i interfejs.
+        grafika.quad(16.f, -0.5f, 20.f, 0.5f, 0.f, Dane::Ground);
         if (state == MENU) { drawMenu(); return; }
 
-        const float alpha = (float)(accumulator / cfg::Dt);
-        for (const phys::Deco& d : phys::decos)
-            gfx::quad(d.x, d.y, d.hx, d.hy, 0.f, d.c);
+        const float alpha = (float)(accumulator / Konfiguracja::Dt);
+        for (const Fizyka::Deco& d : fizyka.decos)
+            grafika.quad(d.x, d.y, d.hx, d.hy, 0.f, d.c);
         drawSling();
-        for (const Body* b : phys::bodies)
+        for (const Body* b : fizyka.bodies)
             drawBody(*b, alpha);
-        for (const PxVec2& p : phys::pivots) {
-            gfx::circle(p.x, p.y, 0.18f, color::Black);
-            gfx::circle(p.x, p.y, 0.07f, color::White);
+        for (const PxVec2& p : fizyka.pivots) {
+            grafika.circle(p.x, p.y, 0.18f, Dane::Black);
+            grafika.circle(p.x, p.y, 0.07f, Dane::White);
         }
         drawExplosions();
         drawActiveBird();
@@ -840,54 +979,62 @@ public:
     }
 
 private:
-    State state = MENU;
-    PxVec2 mouse;
-    std::vector<Kind> queue;
-    size_t birdIdx = 0;
-    int lastBirdId = 0;
-    std::vector<Flash> flashes;
-    bool dragging = false;
-    PxVec2 dragPos = cfg::Anchor;
-    double accumulator = 0.0;
-    float levelTime = 0.f;
-    float sinceLaunch = 10.f;
-    float winTimer = 0.f;
-    float loseTimer = 0.f;
-    float totalPlayTime = 0.f;
-    bool wasSettling = false; // pole klasy zamiast static w applyDamageRules
+    // Stan rozgrywki należy do tej instancji i jest resetowany przy starcie poziomu.
+    State state = MENU;                 // Bieżący ekran: menu, gra, wygrana lub przegrana.
+    PxVec2 mouse;                       // Pozycja kursora w jednostkach świata.
+    std::vector<Kind> queue;            // Rodzaje ptaków dostępnych w tej rozgrywce.
+    size_t birdIdx = 0;                 // Indeks ptaka, który będzie wystrzelony jako następny.
+    int lastBirdId = 0;                 // Id ostatniego ptaka, którego zdolność może być aktywowana.
+    std::vector<Flash> flashes;         // Wybuchy, które są nadal widoczne na ekranie.
+    bool dragging = false;              // Czy gracz przeciąga aktualnego ptaka na procy.
+    PxVec2 dragPos;                     // Aktualna pozycja ptaka podczas celowania.
+    double accumulator = 0.0;           // Czas oczekujący na wykonanie kolejnego stałego kroku fizyki.
+    float levelTime = 0.f;              // Czas od rozpoczęcia aktualnego poziomu.
+    float sinceLaunch = 10.f;           // Czas od ostatniego strzału, używany przy przeładowaniu procy.
+    float winTimer = 0.f;               // Opóźnienie przed pokazaniem zwycięstwa.
+    float loseTimer = 0.f;              // Opóźnienie przed pokazaniem przegranej.
+    float totalPlayTime = 0.f;           // Łączny czas aktywnej symulacji poziomu.
+    bool wasSettling = false;
 
+    // Usuwa ciała poziomu i czyści efekty, przygotowując świat do ponownego użycia.
     void clearWorld() {
-        phys::clear();
+        fizyka.clear();
         flashes.clear();
     }
 
+    // Resetuje liczniki i stan sterowania, buduje poziom i rozpoczyna grę.
     void startLevel() {
         clearWorld();
-        queue = levels::build();
+        Poziomy::build();
+        queue = Poziomy::birdQueue();
         birdIdx = 0;
         lastBirdId = 0;
         dragging = false;
+        dragPos = PxVec2(Konfiguracja::AnchorX, Konfiguracja::AnchorY);
         levelTime = 0.f;
         sinceLaunch = 10.f;
         winTimer = 0.f;
         loseTimer = 0.f;
         totalPlayTime = 0.f;
         accumulator = 0.0;
-        wasSettling = false; // jawny reset przy starcie poziomu
+        wasSettling = false;
         state = PLAYING;
     }
 
+    // Zatrzymuje bieżącą rozgrywkę i wraca do ekranu startowego.
     void toMenu() {
         clearWorld();
         dragging = false;
         state = MENU;
     }
 
-    void handleInput(const Input& in) {
+    // Rozdziela sterowanie menu, rozgrywką oraz ekranami końcowymi.
+    void handleInput(const Wejscie& in) {
+        mouse = in.mouse;
         if (state == MENU) {
-            if (in.escPressed || (in.clicked && ui::Quit.contains(mouse)))
+            if (in.escPressed || (in.clicked && interfejs.Quit.contains(mouse)))
                 quit = true;
-            else if (in.clicked && ui::Play.contains(mouse))
+            else if (in.clicked && interfejs.Play.contains(mouse))
                 startLevel();
             return;
         }
@@ -899,21 +1046,24 @@ private:
             break;
         case WON:
         case LOST:
-            if (in.clicked && ui::Retry.contains(mouse)) startLevel();
-            else if (in.clicked && ui::MenuRight.contains(mouse)) toMenu();
+            if (in.clicked && interfejs.Retry.contains(mouse)) startLevel();
+            else if (in.clicked && interfejs.MenuRight.contains(mouse)) toMenu();
             break;
         default: break;
         }
     }
 
+    // Celowanie jest dostępne, gdy jest ptak, proca się przeładowała i konstrukcja osiadła.
     bool canAim() const {
-        return birdIdx < queue.size() && sinceLaunch > cfg::ReloadDelay &&
-            levelTime > cfg::SettleTime;
+        return birdIdx < queue.size() && sinceLaunch > Konfiguracja::ReloadDelay &&
+            levelTime > Konfiguracja::SettleTime;
     }
 
-    void handleAiming(const Input& in) {
+    // Rozpoczyna przeciąganie przy procy, ogranicza naciąg i strzela po puszczeniu myszy.
+    void handleAiming(const Wejscie& in) {
+        const PxVec2 anchor(Konfiguracja::AnchorX, Konfiguracja::AnchorY);
         if (in.clicked && !dragging) {
-            if ((mouse - cfg::Anchor).magnitude() < cfg::GrabRadius) {
+            if ((mouse - anchor).magnitude() < Konfiguracja::GrabRadius) {
                 if (canAim()) dragging = true;
             }
             else {
@@ -922,11 +1072,11 @@ private:
         }
         if (!dragging) return;
 
-        PxVec2 pull = mouse - cfg::Anchor;
+        PxVec2 pull = mouse - anchor;
         float len = pull.magnitude();
-        if (len > cfg::MaxPull) pull *= cfg::MaxPull / len;
-        dragPos = cfg::Anchor + pull;
-        dragPos.y = std::max(dragPos.y, Birds[queue[birdIdx]].radius);
+        if (len > Konfiguracja::MaxPull) pull *= Konfiguracja::MaxPull / len;
+        dragPos = anchor + pull;
+        dragPos.y = std::max(dragPos.y, Dane::Birds[queue[birdIdx]].radius);
 
         if (!in.lmb) launch();
     }
@@ -934,14 +1084,16 @@ private:
     // v = x * sqrt(k/m); m bierzemy z definicji (jedna kula o zadanej gęstości),
     // żeby nie tworzyć ptaka tylko po to, by odczytać masę.
     PxVec2 launchVelocity(Kind k) const {
-        float r = Birds[k].radius;
-        float mass = cfg::BirdDensity * (4.f / 3.f) * cfg::Pi * r * r * r;
-        return (cfg::Anchor - dragPos) * std::sqrt(cfg::SlingStiffness / mass);
+        float r = Dane::Birds[k].radius;
+        float mass = Konfiguracja::BirdDensity * (4.f / 3.f) * Konfiguracja::Pi * r * r * r;
+        const PxVec2 anchor(Konfiguracja::AnchorX, Konfiguracja::AnchorY);
+        return (anchor - dragPos) * std::sqrt(Konfiguracja::SlingStiffness / mass);
     }
 
+    // Tworzy ciało ptaka, nadaje mu prędkość z modelu sprężyny i zapisuje jego identyfikator.
     void launch() {
         Kind k = queue[birdIdx++];
-        Body* bird = phys::addBall(dragPos.x, dragPos.y, Birds[k].radius, cfg::BirdDensity, BIRD);
+        Body* bird = fizyka.addBall(dragPos.x, dragPos.y, Dane::Birds[k].radius, Konfiguracja::BirdDensity, BIRD);
         bird->kind = k;
         PxVec2 v = launchVelocity(k);
         bird->actor->setLinearVelocity(PxVec3(v.x, v.y, 0.f));
@@ -950,13 +1102,14 @@ private:
         dragging = false;
     }
 
+    // Uruchamia zdolność ostatniego ptaka najwyżej raz, zależnie od jego rodzaju.
     void useAbility() {
-        Body* b = phys::find(lastBirdId);
+        Body* b = fizyka.find(lastBirdId);
         if (!b || b->abilityUsed) return;
         b->abilityUsed = true;
         switch (b->kind) {
         case YELLOW:
-            b->actor->setLinearVelocity(b->actor->getLinearVelocity() * cfg::YellowBoost);
+            b->actor->setLinearVelocity(b->actor->getLinearVelocity() * Konfiguracja::YellowBoost);
             break;
         case BLUE:
             split(*b);
@@ -970,8 +1123,11 @@ private:
 
     // Podział BLUE: pęd zachowany (3 równe masy, symetryczne odchylenie boczne).
     void split(Body& b) {
+        // Zachowujemy pozycję i prędkość oryginału przed zmianą jego rozmiaru.
         PxVec3 p = b.actor->getGlobalPose().p;
         PxVec3 v = b.actor->getLinearVelocity();
+        // Promień dzielimy przez pierwiastek sześcienny z 3, więc masa każdej kuli
+        // przy tej samej gęstości jest równa jednej trzeciej masy początkowej.
         float r = b.radius / std::cbrt(3.f);
 
         PxShape* shape = nullptr;
@@ -979,15 +1135,16 @@ private:
         if (shape)
             shape->setGeometry(PxSphereGeometry(r));
         b.radius = r;
-        PxRigidBodyExt::updateMassAndInertia(*b.actor, cfg::BirdDensity);
+        PxRigidBodyExt::updateMassAndInertia(*b.actor, Konfiguracja::BirdDensity);
         b.mass = b.actor->getMass();
 
         float vLen = v.magnitude();
         PxVec3 perp = vLen > 0.01f ? PxVec3(-v.y, v.x, 0.f) / vLen : PxVec3(0.f, 1.f, 0.f);
-        float dv = vLen * std::tan(cfg::SplitAngle);
+        // Dwie nowe kule dostają przeciwne składowe boczne; ich pędy się znoszą.
+        float dv = vLen * std::tan(Konfiguracja::SplitAngle);
 
         for (int side = -1; side <= 1; side += 2) {
-            Body* n = phys::addBall(p.x, p.y, r, cfg::BirdDensity, BIRD);
+            Body* n = fizyka.addBall(p.x, p.y, r, Konfiguracja::BirdDensity, BIRD);
             n->kind = b.kind;
             n->abilityUsed = true;
             n->actor->setLinearVelocity(v + perp * (dv * side));
@@ -996,16 +1153,17 @@ private:
 
     // Wybuch: impuls J malejący liniowo z odległością. Cięższe ciała odrzucane słabiej.
     void explode(Body& bomb) {
+        // Dla każdego ciała w zasięgu przykładamy impuls od środka eksplozji.
         PxVec3 p = bomb.actor->getGlobalPose().p;
-        for (Body* o : phys::bodies) {
+        for (Body* o : fizyka.bodies) {
             if (o == &bomb || o->dead) continue;
 
             PxVec3 d = o->actor->getGlobalPose().p - p;
             d.z = 0.f;
             float dist = d.magnitude();
-            if (dist >= cfg::BombRadius) continue;
+            if (dist >= Konfiguracja::BombRadius) continue;
 
-            float J = cfg::BombImpulse * (1.f - dist / cfg::BombRadius);
+            float J = Konfiguracja::BombImpulse * (1.f - dist / Konfiguracja::BombRadius);
             PxVec3 dir = dist > 0.001f ? d / dist : PxVec3(0.f, 1.f, 0.f);
             o->actor->addForce(dir * J, PxForceMode::eIMPULSE);
             o->impulse += J;
@@ -1014,49 +1172,51 @@ private:
         bomb.dead = true;
     }
 
+    // Zamienia czas klatki na stałe kroki PhysX, by fizyka nie zależała od FPS.
     void simulate(double frameDt) {
         if (state == MENU) { accumulator = 0.0; return; }
         accumulator += frameDt;
-        while (accumulator >= cfg::Dt) {
-            phys::step(cfg::Dt);
-            levelTime += cfg::Dt;
-            sinceLaunch += cfg::Dt;
-            totalPlayTime += cfg::Dt;
+        while (accumulator >= Konfiguracja::Dt) {
+            fizyka.step(Konfiguracja::Dt);
+            levelTime += Konfiguracja::Dt;
+            sinceLaunch += Konfiguracja::Dt;
+            totalPlayTime += Konfiguracja::Dt;
             applyDamageRules();
-            phys::removeDead();
+            fizyka.removeDead();
             updateFlashes();
             checkEnd();
-            accumulator -= cfg::Dt;
+            accumulator -= Konfiguracja::Dt;
         }
     }
 
     // Reguły zniszczeń. Faza "settling" wyłącza obrażenia, ale nie akumulację impulsów -
     // przy przejściu settling -> !settling zerujemy impulse, żeby śmieci z fazy
     // osiadania nie wywołały fałszywego pęknięcia w pierwszym "dorosłym" kroku.
+    // Stosuje progi obrażeń i rozbija zapisane bloki po iteracji po ciałach.
     void applyDamageRules() {
-        const bool settling = levelTime < cfg::SettleTime;
+        const bool settling = levelTime < Konfiguracja::SettleTime;
         if (!settling && wasSettling) {
-            for (Body* b : phys::bodies) b->impulse = 0.f;
+            for (Body* b : fizyka.bodies) b->impulse = 0.f;
         }
         wasSettling = settling;
 
         std::vector<Fracture> toBreak;
 
-        for (Body* b : phys::bodies) {
-            b->age += cfg::Dt;
+        for (Body* b : fizyka.bodies) {
+            b->age += Konfiguracja::Dt;
 
             if (!settling) {
-                if (b->type == PIG && b->impulse > cfg::PigDeathImpulse) {
+                if (b->type == PIG && b->impulse > Konfiguracja::PigDeathImpulse) {
                     b->dead = true;
                 }
-                else if (b->type == BLOCK && b->impulse > Mats[b->mat].breakImpulse) {
+                else if (b->type == BLOCK && b->impulse > Dane::Mats[b->mat].breakImpulse) {
                     b->dead = true;
                     if (!b->fragment && !b->noShatter)
-                        toBreak.push_back(phys::makeFracture(*b));
+                        toBreak.push_back(fizyka.makeFracture(*b));
                 }
             }
 
-            if (b->type == BIRD && b->age > cfg::BirdLifetime)
+            if (b->type == BIRD && b->age > Konfiguracja::BirdLifetime)
                 b->dead = true;
 
             PxVec3 p = b->actor->getGlobalPose().p;
@@ -1067,46 +1227,49 @@ private:
         }
 
         for (const Fracture& f : toBreak)
-            phys::shatter(f);
+            fizyka.shatter(f);
     }
 
+    // Zwiększa wiek efektów wybuchu i usuwa te, których animacja już się skończyła.
     void updateFlashes() {
-        for (Flash& f : flashes) f.t += cfg::Dt;
+        for (Flash& f : flashes) f.t += Konfiguracja::Dt;
         flashes.erase(std::remove_if(flashes.begin(), flashes.end(),
-            [](const Flash& f) { return f.t > cfg::FlashTime; }),
+            [](const Flash& f) { return f.t > Konfiguracja::FlashTime; }),
             flashes.end());
     }
 
+    // Liczy świnki, które nie zostały oznaczone do usunięcia.
     int pigsAlive() const {
         int pigs = 0;
-        for (const Body* b : phys::bodies)
+        for (const Body* b : fizyka.bodies)
             if (b->type == PIG && !b->dead) ++pigs;
         return pigs;
     }
 
     // Ptak "w locie" także wtedy, gdy wiruje w miejscu (np. utknął na zawiasie).
     bool birdInFlight() const {
-        for (const Body* b : phys::bodies) {
+        for (const Body* b : fizyka.bodies) {
             if (b->type != BIRD || b->dead) continue;
-            if (b->actor->getLinearVelocity().magnitude() > cfg::BirdRestSpeed) return true;
-            if (b->actor->getAngularVelocity().magnitude() > cfg::BirdRestAngular) return true;
+            if (b->actor->getLinearVelocity().magnitude() > Konfiguracja::BirdRestSpeed) return true;
+            if (b->actor->getAngularVelocity().magnitude() > Konfiguracja::BirdRestAngular) return true;
         }
         return false;
     }
 
+    // Wygrana wymaga braku świnek; przegrana czeka na koniec lotu i reakcji konstrukcji.
     void checkEnd() {
         if (state != PLAYING) return;
         if (pigsAlive() == 0) {
-            winTimer += cfg::Dt;
-            if (winTimer > cfg::WinDelay) state = WON;
+            winTimer += Konfiguracja::Dt;
+            if (winTimer > Konfiguracja::WinDelay) state = WON;
             return;
         }
         winTimer = 0.f;
         if (birdIdx >= queue.size()) {
-            if (sinceLaunch > cfg::LoseHardTimeout) { state = LOST; return; }
+            if (sinceLaunch > Konfiguracja::LoseHardTimeout) { state = LOST; return; }
             if (!birdInFlight()) {
-                loseTimer += cfg::Dt;
-                if (loseTimer > cfg::LoseDelay) state = LOST;
+                loseTimer += Konfiguracja::Dt;
+                if (loseTimer > Konfiguracja::LoseDelay) state = LOST;
             }
             else loseTimer = 0.f;
         }
@@ -1118,39 +1281,40 @@ private:
     // ---------------------------------------------------------
     static void drawBirdRotated(Kind k, float x, float y, float r, float angle) {
         float c = std::cos(angle), s = std::sin(angle);
-        gfx::circle(x, y, r, Birds[k].color);
+        grafika.circle(x, y, r, Dane::Birds[k].color);
         float ex = x + r * (0.35f * c - 0.30f * s), ey = y + r * (0.35f * s + 0.30f * c);
-        gfx::circle(ex, ey, r * 0.28f, color::White);
-        gfx::circle(ex + r * 0.05f * c, ey + r * 0.05f * s, r * 0.13f, color::Black);
+        grafika.circle(ex, ey, r * 0.28f, Dane::White);
+        grafika.circle(ex + r * 0.05f * c, ey + r * 0.05f * s, r * 0.13f, Dane::Black);
     }
     static void drawBird(Kind k, float x, float y, float r) {
         drawBirdRotated(k, x, y, r, 0.f);
     }
     static void drawPig(float x, float y, float r, float angle) {
         float c = std::cos(angle), s = std::sin(angle);
-        gfx::circle(x, y, r, color::Pig);
-        gfx::circle(x - 0.2f * c, y - 0.2f * s, r * 0.18f, color::White);
-        gfx::circle(x + 0.2f * c, y + 0.2f * s, r * 0.18f, color::White);
+        grafika.circle(x, y, r, Dane::Pig);
+        grafika.circle(x - 0.2f * c, y - 0.2f * s, r * 0.18f, Dane::White);
+        grafika.circle(x + 0.2f * c, y + 0.2f * s, r * 0.18f, Dane::White);
     }
     static void drawBall(const Body& b, float x, float y, float a) {
-        Color c = Mats[b.mat].color;
-        gfx::circle(x, y, b.radius, c);
-        gfx::circle(x + 0.5f * b.radius * std::cos(a), y + 0.5f * b.radius * std::sin(a),
+        Color c = Dane::Mats[b.mat].color;
+        grafika.circle(x, y, b.radius, c);
+        grafika.circle(x + 0.5f * b.radius * std::cos(a), y + 0.5f * b.radius * std::sin(a),
             b.radius * 0.22f, { c.r * 0.5f, c.g * 0.5f, c.b * 0.5f });
     }
     static void drawBody(const Body& b, float alpha) {
+        // Wybiera kształt i kolor na podstawie typu obiektu oraz jego aktualnej pozy.
         Pose p = b.pose(alpha);
         switch (b.type) {
         case BLOCK: {
-            Color c = Mats[b.mat].color;
+            Color c = Dane::Mats[b.mat].color;
             if (b.fragment) { c.r *= 0.75f; c.g *= 0.75f; c.b *= 0.75f; }
-            gfx::quad(p.x, p.y, b.half.x, b.half.y, p.angle, c);
+            grafika.quad(p.x, p.y, b.half.x, b.half.y, p.angle, c);
             if (b.armLen > 0.f) {
                 float cs = std::cos(p.angle), sn = std::sin(p.angle);
                 PxVec2 top(p.x - b.armLen * sn, p.y + b.armLen * cs);
                 for (int side = -1; side <= 1; side += 2) {
                     float lx = side * b.half.x;
-                    gfx::line(PxVec2(p.x + lx * cs, p.y + lx * sn), top, 0.04f, color::SlingBand);
+                    grafika.line(PxVec2(p.x + lx * cs, p.y + lx * sn), top, 0.04f, Dane::SlingBand);
                 }
             }
             break;
@@ -1162,15 +1326,15 @@ private:
     }
 
     static void drawSling() {
-        gfx::quad(cfg::Anchor.x, 1.5f, 0.2f, 1.7f, 0.f, color::Sling);
+        grafika.quad(Konfiguracja::AnchorX, 1.5f, 0.2f, 1.7f, 0.f, Dane::Sling);
     }
 
     void drawExplosions() const {
         for (const Flash& f : flashes) {
-            float k = f.t / cfg::FlashTime;
-            Color c = color::Explosion;
+            float k = f.t / Konfiguracja::FlashTime;
+            Color c = Dane::Explosion;
             c.a = 0.6f * (1.f - k);
-            gfx::circle(f.x, f.y, cfg::BombRadius * k, c);
+            grafika.circle(f.x, f.y, Konfiguracja::BombRadius * k, c);
         }
     }
 
@@ -1179,110 +1343,136 @@ private:
     void drawActiveBird() const {
         if (state != PLAYING || birdIdx >= queue.size()) return;
         Kind k = queue[birdIdx];
-        const PxVec2 left(cfg::Anchor.x - 0.2f, cfg::Anchor.y);
-        const PxVec2 right(cfg::Anchor.x + 0.2f, cfg::Anchor.y);
+        const PxVec2 left(Konfiguracja::AnchorX - 0.2f, Konfiguracja::AnchorY);
+        const PxVec2 right(Konfiguracja::AnchorX + 0.2f, Konfiguracja::AnchorY);
 
         if (dragging) {
-            gfx::line(left, dragPos, 0.06f, color::SlingBand);
-            gfx::line(right, dragPos, 0.06f, color::SlingBand);
-            drawBird(k, dragPos.x, dragPos.y, Birds[k].radius);
+            grafika.line(left, dragPos, 0.06f, Dane::SlingBand);
+            grafika.line(right, dragPos, 0.06f, Dane::SlingBand);
+            drawBird(k, dragPos.x, dragPos.y, Dane::Birds[k].radius);
 
             PxVec2 v = launchVelocity(k);
             for (int i = 1; i <= 28; ++i) {
                 float t = i * 0.1f;
                 float a = 1.f - i / 32.f;
-                gfx::circle(dragPos.x + v.x * t,
-                    dragPos.y + v.y * t - 0.5f * cfg::Gravity * t * t,
+                grafika.circle(dragPos.x + v.x * t,
+                    dragPos.y + v.y * t - 0.5f * Konfiguracja::Gravity * t * t,
                     0.08f, { 1.f, 1.f, 1.f, a });
             }
         }
-        else if (sinceLaunch > cfg::ReloadDelay) {
-            PxVec2 at(cfg::Anchor.x, cfg::Anchor.y);
-            gfx::line(left, at, 0.06f, color::SlingBand);
-            gfx::line(right, at, 0.06f, color::SlingBand);
-            drawBird(k, at.x, at.y, Birds[k].radius);
+        else if (sinceLaunch > Konfiguracja::ReloadDelay) {
+            PxVec2 at(Konfiguracja::AnchorX, Konfiguracja::AnchorY);
+            grafika.line(left, at, 0.06f, Dane::SlingBand);
+            grafika.line(right, at, 0.06f, Dane::SlingBand);
+            drawBird(k, at.x, at.y, Dane::Birds[k].radius);
         }
     }
 
     void drawQueue() const {
+        // Pokazuje pozostałe ptaki małymi ikonami obok procy.
         if (state != PLAYING) return;
         for (size_t i = birdIdx + 1, n = 0; i < queue.size(); ++i, ++n) {
             Kind k = queue[i];
-            float r = Birds[k].radius * cfg::QueueScale;
-            float x = cfg::QueueStartX - (float)n * cfg::QueueSpacing;
+            float r = Dane::Birds[k].radius * Konfiguracja::QueueScale;
+            float x = Konfiguracja::QueueStartX - (float)n * Konfiguracja::QueueSpacing;
             if (x < 0.7f) break;
             drawBird(k, x, r, r);
         }
     }
 
     void drawHud() const {
+        // HUD pokazuje aktualną liczbę niewystrzelonych ptaków i żywych świnek.
         if (state != PLAYING) return;
         char buf[96];
         int birdsLeft = (int)(queue.size() - birdIdx);
         std::snprintf(buf, sizeof buf, "BIRDS %d  PIGS %d", birdsLeft, pigsAlive());
-        text::draw(buf, 0.5f, 16.6f, 0.14f, color::Hud);
+        tekst.draw(buf, 0.5f, 16.6f, 0.14f, Dane::Hud);
     }
 
     void drawMenu() const {
-        text::drawCentered("ANGRY BIRDS", 16.f + 0.15f, 13.5f - 0.15f, 0.3f, color::Black);
-        text::drawCentered("ANGRY BIRDS", 16.f, 13.5f, 0.3f, { 0.9f, 0.25f, 0.15f });
+        // Menu startowe zawiera tytuł, przykładowe ptaki i przyciski.
+        tekst.drawCentered("ANGRY BIRDS", 16.f + 0.15f, 13.5f - 0.15f, 0.3f, Dane::Black);
+        tekst.drawCentered("ANGRY BIRDS", 16.f, 13.5f, 0.3f, { 0.9f, 0.25f, 0.15f });
         for (int i = 0; i < 4; ++i)
-            drawBird((Kind)i, 10.f + i * 4.f, 11.f, Birds[i].radius * 1.3f);
-        ui::Play.draw(ui::Play.contains(mouse));
-        ui::Quit.draw(ui::Quit.contains(mouse));
+            drawBird((Kind)i, 10.f + i * 4.f, 11.f, Dane::Birds[i].radius * 1.3f);
+        interfejs.Play.draw(interfejs.Play.contains(mouse));
+        interfejs.Quit.draw(interfejs.Quit.contains(mouse));
     }
 
     void drawOverlay() const {
-        gfx::quad(16.f, 9.f, 16.f, 9.f, 0.f, { 0.f, 0.f, 0.f, 0.45f });
+        // Przyciemnienie tła podsumowuje wynik i udostępnia ponowienie lub powrót do menu.
+        grafika.quad(16.f, 9.f, 16.f, 9.f, 0.f, { 0.f, 0.f, 0.f, 0.45f });
         auto button = [&](const Button& b) { b.draw(b.contains(mouse)); };
         if (state == WON)
-            text::drawCentered("YOU WIN", 16.f, 11.f, 0.3f, { 1.f, 0.95f, 0.3f });
+            tekst.drawCentered("YOU WIN", 16.f, 11.f, 0.3f, { 1.f, 0.95f, 0.3f });
         else if (state == LOST)
-            text::drawCentered("GAME OVER", 16.f, 11.f, 0.25f, { 1.f, 0.3f, 0.3f });
-        button(ui::Retry);
-        button(ui::MenuRight);
+            tekst.drawCentered("GAME OVER", 16.f, 11.f, 0.25f, { 1.f, 0.3f, 0.3f });
+        button(interfejs.Retry);
+        button(interfejs.MenuRight);
     }
 };
 
-// =============================================================
-// Punkt wejścia
-// =============================================================
+// Punkt wejścia inicjalizuje biblioteki, uruchamia pętlę i zwalnia zasoby.
 int main() {
+    // Callback wypisuje komunikaty GLFW, np. błąd utworzenia okna.
     glfwSetErrorCallback([](int code, const char* msg) {
         std::fprintf(stderr, "GLFW error %d: %s\n", code, msg);
         });
-    if (!glfwInit()) return -1;
+    if (!glfwInit())
+        return -1;
+
+    // Wybierz kontekst zgodny z używanymi funkcjami OpenGL 2.1.
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-    GLFWwindow* win = glfwCreateWindow(cfg::WindowW, cfg::WindowH,
+    GLFWwindow* window = glfwCreateWindow(Konfiguracja::WindowW, Konfiguracja::WindowH,
         "Angry Birds - PhysX + OpenGL", nullptr, nullptr);
-    if (!win) { glfwTerminate(); return -1; }
-    glfwMakeContextCurrent(win);
-    glfwSwapInterval(1);
-
-    gfx::layout(win);
-    if (!gladLoadGL((GLADloadfunc)glfwGetProcAddress)) return -1;
-
-    gfx::init();
-    text::init();
-    phys::init();
-
-    Game game;
-    Input input;
-    double prev = glfwGetTime();
-    while (!glfwWindowShouldClose(win) && !game.quit) {
-        glfwPollEvents();
-        gfx::layout(win);
-        input.poll(win);
-        double now = glfwGetTime();
-        game.update(input, std::min(now - prev, 0.1));
-        prev = now;
-        gfx::beginFrame(win);
-        game.draw();
-        glfwSwapBuffers(win);
+    if (!window) {
+        glfwTerminate();
+        return -1;
     }
 
-    phys::shutdown();
+    // Ustaw kontekst OpenGL okna i przygotuj funkcje renderujące.
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
+    grafika.layout(window);
+    if (!gladLoadGL((GLADloadfunc)glfwGetProcAddress)) {
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return -1;
+    }
+
+    // Kolejność inicjalizacji: renderer, atlas tekstu, a na końcu scena fizyczna.
+    grafika.init();
+    tekst.init();
+    if (!fizyka.init()) {
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return -1;
+    }
+
+    // Gra i wejście przechowują stan między kolejnymi klatkami.
+    Gra gra;
+    Wejscie wejscie;
+    double poprzedniCzas = glfwGetTime();
+    while (!glfwWindowShouldClose(window) && !gra.quit) {
+        // Zbierz zdarzenia, przelicz wejście i zaktualizuj świat.
+        glfwPollEvents();
+        grafika.layout(window);
+        wejscie.poll(window);
+
+        double aktualnyCzas = glfwGetTime();
+        gra.update(wejscie, std::min(aktualnyCzas - poprzedniCzas, 0.1));
+        poprzedniCzas = aktualnyCzas;
+
+        // Narysuj zaktualizowany stan i pokaż gotową klatkę w oknie.
+        grafika.beginFrame(window);
+        gra.draw();
+        glfwSwapBuffers(window);
+    }
+
+    // Zwalniaj zasoby w odwrotnej kolejności niż ich inicjalizacja.
+    fizyka.shutdown();
+    glfwDestroyWindow(window);
     glfwTerminate();
     return 0;
 }
