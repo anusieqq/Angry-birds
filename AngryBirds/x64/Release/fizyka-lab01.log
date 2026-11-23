@@ -1,7 +1,7 @@
 ﻿  AngryBirds.cpp
-C:\Users\annaz\Desktop\AngryBirds\AngryBirds.cpp(777,38): warning C4566: znak przedstawiony przez nazwę zawierającą znaki uniwersalne "\u0142" nie może być przedstawiony w bieżącej stronie kodowej (1252)
+C:\Users\annaz\Desktop\AngryBirds\AngryBirds.cpp(938,38): warning C4566: znak przedstawiony przez nazwę zawierającą znaki uniwersalne "\u0142" nie może być przedstawiony w bieżącej stronie kodowej (1252)
   Trwa generowanie kodu
   Previous IPDB and IOBJ mismatch, fall back to full compilation.
-  All 877 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
+  All 876 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
   Zakończono generowanie kodu
   fizyka-lab01.vcxproj -> C:\Users\annaz\Desktop\AngryBirds\x64\Release\AngryBirds.exe
