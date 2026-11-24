@@ -1,4 +1,21 @@
-﻿#include <glad/gl.h>
+﻿// ============================================================================
+// Angry Birds - PhysX + OpenGL (GLFW)
+//
+// Gra 2D oparta na silniku PhysX 3D z zablokowanymi stopniami swobody
+// (ruch w płaszczyźnie XY, obrót wokół osi Z). Cała fizyka (ruch, kolizje,
+// zawiasy, silniki) jest liczona przez PhysX; OpenGL służy wyłącznie do
+// rysowania.
+//
+// Struktura pliku:
+//   1. Config / GameData  - stałe i dane statyczne
+//   2. Physics            - opakowanie PhysX (scena, ciała, kontakty, zawiasy)
+//   3. Levels             - budowa konstrukcji poziomu
+//   4. Graphics / Text / Ui / Input - warstwa prezentacji i wejścia
+//   5. Game               - logika rozgrywki
+//   6. main               - pętla główna
+// ============================================================================
+
+#include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <PxPhysicsAPI.h>
 #define STB_TRUETYPE_IMPLEMENTATION
@@ -10,210 +27,197 @@
 #include <vector>
 using namespace physx;
 
-// Wszystkie stałe liczbowe gry (rozmiar okna, świat,
-// grawitacja, krok fizyki, parametry procy, progi czasowe, ustawienia solvera),
+
+
+// Wszystkie parametry liczbowe gry w jednym miejscu (okno, świat,
+// grawitacja, krok fizyki, proca, progi czasowe, ustawienia solvera).
+// Jednostki: metry, sekundy, kilogramy, radiany.
 class Config {
 public:
 
+    // --- Okno i świat gry ---
     static constexpr int WindowW = 1280, WindowH = 720;
-    // Logiczny rozmiar świata gry w jednostkach (szerokość, wysokość) - niezależny od rozdzielczości.
+    // Logiczny rozmiar świata [m]; niezależny od rozdzielczości okna.
     static constexpr float ViewW = 32.f, ViewH = 18.f;
 
     static constexpr float Pi = 3.14159265f;
 
+    // --- Symulacja ---
     static constexpr float Gravity = 9.81f;
     // Stały krok fizyki (60 Hz), niezależny od liczby klatek renderowania.
     static constexpr float Dt = 1.f / 60.f;
 
-    // Współrzędne punktu zaczepienia procy w świecie.
+    // --- Proca ---
+    // Punkt zaczepienia procy w świecie.
     static constexpr float AnchorX = 5.f;
     static constexpr float AnchorY = 3.2f;
-
-    // Maksymalny naciąg procy - dłuższy wektor jest przycinany.
+    // Maksymalny naciąg [m]; dłuższy wektor jest przycinany.
     static constexpr float MaxPull = 3.f;
-    // Minimalny naciąg procy - krótszy naciąg anuluje strzał (nie marnuje ptaka).
+    // Minimalny naciąg [m]; krótszy anuluje strzał (ptak nie jest tracony).
     static constexpr float MinPull = 0.3f;
-    // Sztywność sprężyny procy [N/m], wykorzystywana do obliczenia prędkości wystrzału.
+    // Sztywność sprężyny procy [N/m]; wyznacza prędkość wystrzału (v = x*sqrt(k/m)).
     static constexpr float SlingStiffness = 80.f;
-    // Promień, w którym kliknięcie przy procy zaczyna przeciąganie ptaka.
+    // Promień [m], w którym kliknięcie przy procy rozpoczyna przeciąganie.
     static constexpr float GrabRadius = 1.5f;
-    // Czas przeładowania procy [s] po strzale.
+    // Czas przeładowania procy po strzale [s].
     static constexpr float ReloadDelay = 1.5f;
-    // Współrzędna X pierwszej ikony ptaka w kolejce (pozostałe są na lewo od niej).
+
+    // --- Kolejka ptaków (ikony na ekranie) ---
+    // Współrzędna X pierwszej ikony; kolejne leżą na lewo od niej.
     static constexpr float QueueStartX = 3.6f;
-    // Odstęp w jednostkach świata między ikonami ptaków w kolejce.
+    // Odstęp między ikonami [m].
     static constexpr float QueueSpacing = 0.65f;
-    // Skala pomniejszenia ikon ptaków w kolejce względem rzeczywistego promienia.
+    // Skala ikon względem rzeczywistego promienia ptaka.
     static constexpr float QueueScale = 0.6f;
 
-    // Tłumienie obrotu [1/s] wspólne dla wszystkich ciał (jedno, brak innych "sztucznych" tłumień).
+    // --- Parametry brył ---
+    // Jedyne sztuczne tłumienie w symulacji: tłumienie obrotu [1/s] dla wszystkich ciał.
     static constexpr float AngularDamping = 0.1f;
-    // Gęstość ptaka [kg/m^3] używana do wyliczenia masy z objętości kuli.
+    // Gęstości [kg/m^3]; masa wynika z objętości kuli.
     static constexpr float BirdDensity = 3.f;
-    // Gęstość świni [kg/m^3] używana do wyliczenia masy z objętości kuli.
     static constexpr float PigDensity = 1.f;
 
-    // Czas stabilizacji konstrukcji po rozpoczęciu poziomu; w tym czasie obrażenia są wyłączone.
+    // --- Obrażenia i warunki końca gry ---
+    // Czas stabilizacji konstrukcji po starcie poziomu [s]; obrażenia są wtedy wyłączone.
     static constexpr float SettleTime = 1.5f;
-    // Impuls [N*s], po przekroczeniu którego świnia ginie.
+    // Skumulowany impuls kontaktu [N*s], powyżej którego świnia ginie.
     static constexpr float PigDeathImpulse = 3.f;
-    // Maksymalny czas życia ptaka [s] - po nim ptak jest automatycznie usuwany.
+    // Maksymalny czas życia ptaka [s]; po nim ptak jest usuwany.
     static constexpr float BirdLifetime = 12.f;
-    // Opóźnienie [s] przed pokazaniem ekranu wygranej po zabiciu ostatniej świni.
+    // Opóźnienie ekranu wygranej po zabiciu ostatniej świni [s].
     static constexpr float WinDelay = 0.8f;
-    // Opóźnienie [s] przed pokazaniem ekranu przegranej po ustaniu ruchu ostatniego ptaka.
+    // Opóźnienie ekranu przegranej po wyhamowaniu ostatniego ptaka [s].
     static constexpr float LoseDelay = 3.f;
-    // Próg prędkości liniowej [m/s], poniżej którego ptak jest uznawany za nieruchomy.
+    // Progi uznania ptaka za nieruchomego: prędkość liniowa [m/s] i kątowa [rad/s].
     static constexpr float BirdRestSpeed = 0.5f;
-    // Próg prędkości kątowej [rad/s], poniżej którego ptak jest uznawany za nieruchomy.
     static constexpr float BirdRestAngular = 1.0f;
-    // Twardy limit czasu [s] od ostatniego strzału, po którym gra ogłasza przegraną.
+    // Twardy limit czasu od ostatniego strzału [s]; po nim gra ogłasza przegraną.
     static constexpr float LoseHardTimeout = BirdLifetime + 2.f;
 
-    // Promień rażenia wybuchu [m] - poza tym promieniem impuls nie działa.
+    // --- Zdolności ptaków ---
+    // Wybuch (czarny ptak): promień rażenia [m] i maksymalny impuls w epicentrum [N*s]
+    // (maleje liniowo z odległością).
     static constexpr float BombRadius = 6.f;
-    // Maksymalny impuls wybuchu [N*s] w epicentrum (maleje liniowo z odległością).
     static constexpr float BombImpulse = 20.f;
     // Czas wyświetlania błysku po wybuchu [s].
     static constexpr float FlashTime = 0.4f;
-
-    // Mnożnik prędkości żółtego ptaka po użyciu zdolności (podwojenie).
+    // Żółty ptak: mnożnik prędkości po aktywacji zdolności.
     static constexpr float YellowBoost = 2.f;
-    // Kąt [rad] rozwidlenia bocznego przy podziale niebieskiego ptaka na trzy.
+    // Niebieski ptak: kąt rozwidlenia bocznych ptaków przy podziale na trzy [rad].
     static constexpr float SplitAngle = 0.25f;
 
-    // Liczba iteracji pozycyjnych solvera PhysX (stabilność stosów i zawiasów).
+    // --- Solver PhysX ---
+    // Iteracje pozycyjne (stabilność stosów i zawiasów) oraz prędkościowe (stabilność kolizji).
     static constexpr int SolverPos = 12;
-    // Liczba iteracji prędkościowych solvera PhysX (stabilność kolizji).
     static constexpr int SolverVel = 4;
 };
 
 
 struct Color { float r, g, b, a = 1.f; };
 
-// Struktura BirdDef: definicja typu ptaka - promień kuli i kolor ciała.
+// Definicja typu ptaka: promień kuli i kolor ciała.
 struct BirdDef { float radius; Color color; };
-// Struktura MatDef: definicja materiału konstrukcji - gęstość, impuls niszczący, tarcie, sprężystość, kolor.
+// Definicja materiału konstrukcji: gęstość, impuls niszczący, tarcie, sprężystość, kolor.
 struct MatDef { float density, breakImpulse, friction, restitution; Color color; };
 
-// Enum Type: typ obiektu w świecie gry (decyduje o zachowaniu i rysowaniu).
-// BLOCK - nieruchomy/ruchomy blok konstrukcji; PIG - świnia; BIRD - ptak; BALL - kula wahadła.
+// Typ obiektu w świecie gry (decyduje o zachowaniu i sposobie rysowania).
 enum Type { BLOCK, PIG, BIRD, BALL };
-// Enum Mat: rodzaje materiałów konstrukcyjnych - każdy ma własną gęstość, tarcie, sprężystość i próg zniszczenia.
+// Materiały konstrukcyjne.
 enum Mat { WOOD, STONE, GLASS, METAL, ALU, NumMats };
-// Enum Kind: rodzaje ptaków - każdy ma inny wygląd i inną zdolność specjalną.
+// Rodzaje ptaków (każdy ma inną zdolność specjalną).
 enum Kind { RED, YELLOW, BLUE, BLACK };
-// Enum State: aktualny ekran gry - menu, rozgrywka, wygrana lub przegrana.
+// Aktualny ekran gry.
 enum State { MENU, PLAYING, WON, LOST };
 
-// Klasa GameData: katalog wszystkich stałych danych gry - kolorów, definicji ptaków
-// i materiałów oraz deklaracji struktur (Pose, Body, Flash, Fracture). Trzyma dane
-// w jednym miejscu, żeby nie zaśmiecać klas logiki.
+//  katalog stałych danych gry (kolory, definicje ptaków i materiałów)
+// oraz deklaracje struktur pomocniczych współdzielonych przez klasy logiki.
 class GameData {
 public:
-    // Struktura Pose: uproszczona poza obiektu do rysowania (x, y, kąt obrotu).
+    // Uproszczona poza obiektu dla renderera (x, y, kąt).
     struct Pose;
-    // Struktura Body: łączy aktora PhysX z danymi gry (typ, materiał, rozmiar, stan).
+    // Łączy aktora PhysX z danymi gry (typ, materiał, rozmiar, stan).
     struct Body;
-    // Struktura Flash: efekt wizualny wybuchu (pozycja i czas życia).
+    // Efekt wizualny wybuchu (pozycja i czas życia).
     struct Flash;
-    // Struktura Fracture: migawka bloku w chwili rozpadu (pozycja, prędkości, wymiary, materiał).
+    // Migawka bloku w chwili rozpadu (pozycja, prędkości, wymiary, materiał).
     struct Fracture;
 
     static constexpr Color White{ 1.f, 1.f, 1.f };
-
     static constexpr Color Black{ 0.f, 0.f, 0.f };
-
     static constexpr Color Sky{ 0.53f, 0.81f, 0.92f };
-
     static constexpr Color Ground{ 0.35f, 0.65f, 0.25f };
-
     static constexpr Color Sling{ 0.40f, 0.25f, 0.10f };
-
     static constexpr Color SlingBand{ 0.20f, 0.10f, 0.05f };
-
     static constexpr Color Pig{ 0.30f, 0.75f, 0.30f };
-
     static constexpr Color Explosion{ 1.f, 0.6f, 0.1f };
-
     static constexpr Color Hud{ 0.1f, 0.1f, 0.1f };
-
     static constexpr Color Frame{ 0.30f, 0.22f, 0.15f };
+
     // Próg zniszczenia dla materiałów, które nie powinny pękać.
     static constexpr float Unbreakable = 1e30f;
-    // Tablica definicji czterech typów ptaków (promień, kolor).
+    // Definicje ptaków, indeksowane wartością Kind.
     static const BirdDef Birds[4];
-    // Tablica definicji wszystkich materiałów konstrukcyjnych.
+    // Definicje materiałów, indeksowane wartością Mat.
     static const MatDef Mats[NumMats];
 };
-// Definicje ptaków: promień kuli i kolor (RED, YELLOW, BLUE, BLACK).
+// Ptaki: promień kuli i kolor (kolejność zgodna z enum Kind).
 const BirdDef GameData::Birds[4] = {
     {0.50f, {0.85f, 0.15f, 0.15f}}, // czerwony
     {0.42f, {0.97f, 0.85f, 0.10f}}, // żółty
     {0.35f, {0.30f, 0.60f, 0.95f}}, // niebieski
     {0.60f, {0.10f, 0.10f, 0.10f}}, // czarny
 };
-// Definicje materiałów: gęstość, próg zniszczenia, tarcie, sprężystość, kolor.
+// Materiały: gęstość, próg zniszczenia, tarcie, sprężystość, kolor (kolejność zgodna z enum Mat).
 const MatDef GameData::Mats[NumMats] = {
-    {0.8f, 9.0f, 0.65f, 0.15f, {0.65f, 0.45f, 0.25f}},  // drewno
+    {1.0f, 9.0f, 0.65f, 0.15f, {0.65f, 0.45f, 0.25f}},  // drewno
     {2.5f, GameData::Unbreakable, 0.70f, 0.05f, {0.55f, 0.55f, 0.60f}}, // kamień (kula wahadła, domino)
-    {2.5f, 4.0f, 0.55f, 0.10f, {0.70f, 0.90f, 0.95f}}, // szkło
+    {0.5f, 4.0f, 0.55f, 0.10f, {0.70f, 0.90f, 0.95f}}, // szkło
     {7.8f, GameData::Unbreakable, 0.40f, 0.20f, {0.35f, 0.38f, 0.45f}}, // metal (ogniwa wahadła)
     {2.7f, GameData::Unbreakable, 0.40f, 0.20f, {0.75f, 0.78f, 0.85f}}, // aluminium (siedzisko, wiatrak)
 };
 
-// Funkcja angleZ: wyciąga kąt obrotu wokół osi Z z kwaternionu PhysX.
-// Używana do interpolacji rysowania i do zapisu kąta w migawce rozpadu.
+// Wyciąga kąt obrotu wokół osi Z z kwaternionu PhysX.
 inline float angleZ(const PxQuat& q) { return 2.f * std::atan2(q.z, q.w); }
-// Struktura Pose: pozycja (x, y) i kąt obrotu - to, co renderer potrzebuje do narysowania obiektu.
+
 struct GameData::Pose { float x, y, angle; };
 
-// Struktura Body: łączy aktora PhysX z danymi potrzebnymi grze - typem obiektu,
-// materiałem, rozmiarem, stanem zniszczenia, zebranym impulsem i stanem sprzed kroku.
+// obiekt gry powiązany z aktorem PhysX. 
 struct GameData::Body {
-    // Wskaźnik do aktora PhysX - właściciela symulacji tego ciała.
     PxRigidDynamic* actor = nullptr;
 
     Type type = BLOCK;
-
     Mat mat = WOOD;
-
     Kind kind = RED;
-
     int id = 0;
 
+    // Połowy wymiarów (bloki) lub promień (kule).
     PxVec2 half{ 0, 0 };
-
     float radius = 0;
+
     // Suma impulsów kontaktowych zebranych w bieżącym kroku [N*s] - podstawa obrażeń.
+    // Zerowana po każdym kroku w applyDamageRules().
     float impulse = 0;
-    // Licznik wieku ciała [s] - rośnie o Dt na każdy krok; używany do usuwania starych ptaków.
+    // Wiek ciała [s]; służy do usuwania starych ptaków.
     float age = 0;
 
     bool abilityUsed = false;
-
     bool dead = false;
-
+    // Fragment powstały z rozpadu bloku (nie rozpada się ponownie, rysowany ciemniej).
     bool fragment = false;
-    // Czy wyłączyć rozpad dla tego ciała (używane przez setCom - ciała z przesuniętym COM są nierozpadowe).
+    // Wyłącza rozpad; ustawiane przy przesuniętym środku masy (patrz Physics::setCom).
     bool noShatter = false;
 
+    // Długość cięgien huśtawki 
     float armLen = 0;
 
-    // Pozycja z poprzedniego kroku fizyki - do interpolacji rysowania między klatkami.
+    // Stan sprzed kroku fizyki. 
     PxVec3 prevPos{ 0, 0, 0 };
-    // Kąt obrotu z poprzedniego kroku fizyki - do interpolacji rysowania.
     float prevAngle = 0.f;
-    // Położenie środka masy sprzed kroku - do liczenia prędkości punktu uderzenia.
     PxVec3 preCom{ 0, 0, 0 };
-    // Prędkość liniowa środka masy sprzed kroku - do liczenia prędkości uderzenia.
     PxVec3 preV{ 0, 0, 0 };
-    // Prędkość kątowa sprzed kroku - do liczenia prędkości punktu uderzenia.
     PxVec3 preW{ 0, 0, 0 };
 
-    // Zapisuje stan ciała przed krokiem fizyki. Dane służą do interpolacji renderowania
-    // oraz do obliczenia prędkości uderzenia w callbacku kontaktów
-
+    // Zapisuje stan ciała tuż przed krokiem fizyki.
     void saveState() {
         PxTransform t = actor->getGlobalPose();
         prevPos = t.p;
@@ -222,12 +226,13 @@ struct GameData::Body {
         preV = actor->getLinearVelocity();
         preW = actor->getAngularVelocity();
     }
-    // Zwraca prędkość punktu p ciała ze stanu sprzed kroku
-    // (v + omega x (p - COM)) - używana do oceny siły uderzenia w punkcie kontaktu.
+
+    // Prędkość punktu p ciała ze stanu sprzed kroku
+    // Używana do oceny siły uderzenia w punkcie kontaktu.
     PxVec3 velocityAt(const PxVec3& p) const { return preV + preW.cross(p - preCom); }
 
-    // Zwraca pozycję i kąt interpolowane między poprzednim a bieżącym krokiem.
-    // alpha = 0 daje stan sprzed kroku, alpha = 1 daje stan bieżący - płynne rysowanie.
+    // Poza interpolowana między stanem sprzed kroku (alpha = 0) a bieżącym (alpha = 1).
+    // Różnica kątów jest normalizowana, aby uniknąć skoku przy przejściu przez ±pi.
     Pose pose(float alpha) const {
         PxTransform t = actor->getGlobalPose();
         float da = std::remainder(angleZ(t.q) - prevAngle, 2.f * Config::Pi);
@@ -236,77 +241,64 @@ struct GameData::Body {
     }
 };
 
-// Aliasy typów - skracają zapis w kodzie.
 using Pose = GameData::Pose;
 using Body = GameData::Body;
 
-// Struktura Flash: efekt wybuchu - pozycja (x, y) i czas życia (t) w sekundach.
 struct GameData::Flash { float x, y, t; };
-// Struktura Fracture: migawka bloku potrzebna do rozpadu - pozycja, prędkości, wymiary, kąt, materiał.
-struct GameData::Fracture {
-    // Pozycja środka bloku w chwili rozpadu.
-    PxVec3 pos;
-    // Prędkość liniowa środka masy bloku w chwili rozpadu.
-    PxVec3 v;
-    // Prędkość kątowa bloku w chwili rozpadu.
-    PxVec3 omega;
 
-    PxVec2 half;
-    // Kąt obrotu bloku w chwili rozpadu (żeby fragmenty były prawidłowo obrócone).
-    float angle;
-    // Materiał bloku - decyduje o gęstości i typie siatki fragmentów.
-    Mat mat;
+//  dane potrzebne do rozpadu bloku. Zapisywane przed usunięciem
+// oryginału, aby fragmenty odziedziczyły jego ruch.
+struct GameData::Fracture {
+    PxVec3 pos;     // położenie środka bloku
+    PxVec3 v;       // prędkość liniowa środka masy
+    PxVec3 omega;   // prędkość kątowa
+    PxVec2 half;    // połowy wymiarów
+    float angle;    // kąt obrotu (fragmenty muszą być tak samo obrócone)
+    Mat mat;        // materiał: decyduje o gęstości i podziale na fragmenty
 };
-// Aliasy typów - skracają zapis w kodzie.
 using Flash = GameData::Flash;
 using Fracture = GameData::Fracture;
 
-// Klasa Physics: zarządza całą symulacją PhysX - inicjalizacją sceny, tworzeniem ciał
-// i materiałów, krokiem symulacji, odbieraniem kontaktów, zawiasami, silnikami,
-// rozpadem bloków i zwalnianiem zasobów.
+
+
+//  opakowanie PhysX - inicjalizacja sceny, tworzenie ciał i materiałów,
+// krok symulacji, odbiór kontaktów, zawiasy i silniki, rozpad bloków
+// oraz zwalnianie zasobów.
 class Physics {
 public:
-    // Grupa filtrowania dla ptaków - ptaki nie kolidują ze sobą (uproszczenie rozgrywki).
+    // Grupy filtrowania kolizji (używane w filterShader).
+    // Ptaki nie kolidują ze sobą (uproszczenie rozgrywki).
     static constexpr PxU32 BirdGroup = 1;
-    // Grupa filtrowania dla cięgien huśtawki - nie kolidują z niczym (są tylko wizualne).
+    // Elementy tylko wizualne (np. cięgna huśtawki) - nie kolidują z niczym.
     static constexpr PxU32 GhostGroup = 2;
 
     PxDefaultAllocator allocator;
-
     PxDefaultErrorCallback errorCallback;
-
     PxFoundation* foundation = nullptr;
-
     PxPhysics* physics = nullptr;
-
     PxDefaultCpuDispatcher* dispatcher = nullptr;
-
     PxScene* scene = nullptr;
 
-    PxMaterial* creatureMat = nullptr;
-
-    PxMaterial* matPx[NumMats] = {};
+    PxMaterial* creatureMat = nullptr;     // materiał ptaków, świń i granic planszy
+    PxMaterial* matPx[NumMats] = {};       // materiały konstrukcji
 
     PxRigidStatic* ground = nullptr;
-
     PxRigidStatic* leftWall = nullptr;
-
     PxRigidStatic* rightWall = nullptr;
 
     std::vector<Body*> bodies;
-
     int nextId = 1;
 
-    // Struktura Deco: czysto wizualny element tła (bez kolizji) - pozycja, wymiary, kolor.
+    // Element tła bez kolizji (pozycja, wymiary, kolor).
     struct Deco { float x, y, hx, hy; Color c; };
-
     std::vector<Deco> decos;
 
+    // Punkty zawieszenia rysowane jako osie obrotu.
     std::vector<PxVec2> pivots;
 
-    // Decyduje, które pary kształtów kolidują. Ptaki pomijają się
-    // wzajemnie, cięgna huśtawki (GhostGroup) nie kolidują z niczym. Pozostałe pary
-    // dostają standardowe kontakty z punktami i impulsami + CCD.
+    // Shader filtrowania: decyduje, które pary kształtów kolidują.
+    // Pary z GhostGroup oraz ptak-ptak są pomijane. Pozostałe dostają zwykłe
+    // kontakty z powiadomieniami o punktach i impulsach oraz detekcję CCD.
     static PxFilterFlags filterShader(PxFilterObjectAttributes, PxFilterData fd0, PxFilterObjectAttributes,
         PxFilterData fd1, PxPairFlags& pairFlags, const void*, PxU32) {
         if (fd0.word0 == GhostGroup || fd1.word0 == GhostGroup)
@@ -321,37 +313,37 @@ public:
         return PxFilterFlag::eDEFAULT;
     }
 
-    // Odzyskuje wskaźnik do Body z aktora PhysX przez pole userData.
-    // Dla ciał statycznych (podłoże, ściany) zwraca nullptr, bo nie mają userData.
+    // Zwraca Body powiązane z aktorem (przez userData) albo nullptr dla ciał
+    // statycznych (podłoże, ściany).
     static Body* bodyOf(PxActor* a) {
         return (a && a->userData) ? static_cast<Body*>(a->userData) : nullptr;
     }
 
-    // Minimalna prędkość względna [m/s] w punkcie kontaktu, poniżej której impuls nie liczy się do obrażeń.
+    // Minimalna prędkość względna w punkcie kontaktu [m/s]; poniżej niej kontakt
+    // nie liczy się do obrażeń (sam nacisk spoczywających bloków nic nie niszczy).
     static constexpr float MinImpactSpeed = 0.5f;
 
-    // Oblicza prędkość względną ciał w punkcie kontaktu
-    // na podstawie stanu SPRZED kroku (po kroku solver wyhamował zderzenie).
-    // Ciało statyczne ma prędkość 0 - przekazujemy nullptr.
+    // Prędkość względna ciał a i b w punkcie p, liczona ze stanu SPRZED kroku.
+    // Ciało statyczne ma prędkość zero (przekazujemy nullptr).
     static PxVec3 relativeVelocityAt(const Body* a, const Body* b, const PxVec3& p) {
         PxVec3 v0 = a ? a->velocityAt(p) : PxVec3(0.f);
         PxVec3 v1 = b ? b->velocityAt(p) : PxVec3(0.f);
         return v0 - v1;
     }
 
-    // Klasa ContactCallback: odbiera zdarzenia kontaktu z PhysX i zbiera impulsy
-    // kontaktowe do pól Body::impulse - gra używa ich potem do obrażeń i rozpadu.
+    // ContactCallback: model obrażeń. Dla każdego punktu kontaktu sprawdza
+    // prędkość względną; jeśli przekracza MinImpactSpeed, impuls kontaktu jest
+    // dodawany do obu ciał (Body::impulse). Progi zniszczenia są później
+    // porównywane z tą sumą w Game::applyDamageRules().
     class ContactCallback : public PxSimulationEventCallback {
     public:
-        // Dla każdego kontaktu oblicza prędkość względną w punkcie styku.
-        // Jeśli przekracza MinImpactSpeed, dodaje impuls do obu ciał.
-        // Dzięki temu sam nacisk nieruchomych bloków nie powoduje uszkodzeń.
         void onContact(const PxContactPairHeader& header, const PxContactPair* pairs, PxU32 count) override {
             if (!header.actors[0] || !header.actors[1])
                 return;
             Body* a = Physics::bodyOf(header.actors[0]);
             Body* b = Physics::bodyOf(header.actors[1]);
             for (PxU32 i = 0; i < count; ++i) {
+                // Pomijamy pary, których kształt został już usunięty.
                 if (pairs[i].flags &
                     (PxContactPairFlag::eREMOVED_SHAPE_0 | PxContactPairFlag::eREMOVED_SHAPE_1))
                     continue;
@@ -372,15 +364,15 @@ public:
                 if (b) b->impulse += sum;
             }
         }
-        // Puste implementacje wymagane przez interfejs PhysX - nie używamy tych zdarzeń.
+        
         void onConstraintBreak(PxConstraintInfo*, PxU32) override {}
         void onWake(PxActor**, PxU32) override {}
         void onSleep(PxActor**, PxU32) override {}
         void onTrigger(PxTriggerPair*, PxU32) override {}
         void onAdvance(const PxRigidBody* const*, const PxTransform*, PxU32) override {}
-    } contactCallback; // Instancja callbacku przekazywana do sceny PhysX.
+    } contactCallback;
 
-    // Tworzy fundament PhysX, silnik, dyspozytor, scenę, materiały
+    // Tworzy fundament, silnik, dyspozytor, scenę i materiały PhysX
     // oraz nieruchome granice planszy (podłoże, ściany). Zwraca false przy błędzie.
     bool init() {
         foundation = PxCreateFoundation(PX_PHYSICS_VERSION, allocator, errorCallback);
@@ -405,6 +397,7 @@ public:
         desc.cpuDispatcher = dispatcher;
         desc.filterShader = Physics::filterShader;
         desc.simulationEventCallback = &contactCallback;
+        // CCD zapobiega "tunelowaniu" szybkich obiektów przez cienkie przeszkody.
         desc.flags |= PxSceneFlag::eENABLE_CCD;
 #if PX_PHYSICS_VERSION_MAJOR == 4
         desc.flags |= PxSceneFlag::eENABLE_STABILIZATION;
@@ -416,13 +409,14 @@ public:
         }
 
         creatureMat = physics->createMaterial(0.6f, 0.5f, 0.15f);
+        // Tarcie dynamiczne 
         for (int i = 0; i < NumMats; ++i)
             matPx[i] = physics->createMaterial(GameData::Mats[i].friction, GameData::Mats[i].friction * 0.85f, GameData::Mats[i].restitution);
 
         ground = PxCreateStatic(*physics, PxTransform(PxVec3(16.f, -0.5f, 0.f)),
             PxBoxGeometry(20.f, 0.5f, 2.f), *creatureMat);
         scene->addActor(*ground);
-        // Ściany sięgają bardzo wysoko, żeby ptak wystrzelony stromo nie wyleciał poza planszę.
+        // Ściany sięgają bardzo wysoko, aby ptak wystrzelony stromo nie wyleciał poza planszę.
         leftWall = PxCreateStatic(*physics, PxTransform(PxVec3(0.1f, 20.f, 0.f)),
             PxBoxGeometry(0.2f, 20.5f, 2.f), *creatureMat);
         rightWall = PxCreateStatic(*physics, PxTransform(PxVec3(Config::ViewW - 0.1f, 20.f, 0.f)),
@@ -432,15 +426,13 @@ public:
         return true;
     }
 
-    // Zwalnia aktora PhysX i usuwa dane gry (musi być razem,
-    // bo Body::actor wskazuje na aktora, a aktor->userData wskazuje na Body).
+    // Zwalnia aktora PhysX razem z danymi gry (Body i aktor wskazują na siebie nawzajem).
     void releaseBody(Body* b) {
         b->actor->release();
         delete b;
     }
 
-    // Usuwa wszystkie dynamiczne ciała i dekoracje poziomu,
-    // przygotowując świat do ponownego zbudowania (np. po restarcie poziomu).
+    // Usuwa wszystkie dynamiczne ciała i dekoracje (przed ponowną budową poziomu).
     void clear() {
         for (Body* b : bodies)
             releaseBody(b);
@@ -449,8 +441,7 @@ public:
         pivots.clear();
     }
 
-    // Zwalnia wszystkie zasoby PhysX po zamknięciu gry
-    // (odwrotna kolejność niż inicjalizacja).
+    // Zwalnia zasoby PhysX w kolejności odwrotnej do inicjalizacji.
     void shutdown() {
         clear();
         if (leftWall) leftWall->release();
@@ -465,17 +456,17 @@ public:
         if (foundation) foundation->release();
     }
 
-    // Wykonuje jeden stały krok PhysX. Najpierw zapisuje stan wszystkich
-    // ciał (saveState), potem symuluje, potem pobiera wyniki (kolizje, callbacki).
+    // Jeden stały krok symulacji: zapis stanu ciał (do interpolacji i obliczeń
+    // uderzeń), symulacja, pobranie wyników wraz z callbackami kontaktów.
     void step(float dt) {
         for (Body* b : bodies) b->saveState();
         scene->simulate(dt);
         scene->fetchResults(true);
     }
 
-    // Wspólna finalizacja nowego ciała - nadaje id, blokuje stopnie
-    // swobody (tylko XY + obrót Z), ustawia tłumienie, iteracje solvera, userData,
-    // dodaje do sceny i rejestru. Zwraca gotowe Body.
+    // Wspólna finalizacja nowego ciała: nadaje id, blokuje stopnie swobody
+    // (zostaje ruch w XY i obrót wokół Z - model 2D), ustawia tłumienie
+    // i iteracje solvera, łączy aktora z Body i rejestruje go w scenie.
     Body* finish(Body* b, PxRigidDynamic* actor) {
         b->actor = actor;
         b->id = nextId++;
@@ -491,8 +482,8 @@ public:
         return b;
     }
 
-    // Tworzy prostokątny blok o połowach hx/hy, materiale mat i kącie angle.
-    // Jeśli fragment=true, włącza CCD (fragmenty mogą szybko latać po rozpadzie).
+    // Tworzy prostokątny blok (połowy wymiarów hx, hy) z materiału mat, obrócony o angle.
+    // Fragmenty po rozpadzie dostają CCD, bo mogą szybko się rozlatywać.
     Body* addBox(float x, float y, float hx, float hy, Mat mat, float angle = 0.f, bool fragment = false) {
         auto* b = new Body;
         b->type = BLOCK;
@@ -507,9 +498,10 @@ public:
         return finish(b, actor);
     }
 
-    // Tworzy ciało huśtawki - siedzisko (prostokąt) i dwa cięgna
-    // (dodatkowe kształty na tym samym aktorze) oznaczone jako GhostGroup (bez kolizji).
-    // Cięgna mają masę, więc COM huśtawki leży wyżej niż siedzisko.
+    // Tworzy huśtawkę: siedzisko (prostokąt) i dwa cięgna jako dodatkowe kształty
+    // tego samego aktora, oznaczone GhostGroup (bez kolizji). Cięgna mają masę,
+    // więc środek masy huśtawki leży wyżej niż siedzisko, a masa i moment
+    // bezwładności są przeliczane po dodaniu kształtów.
     Body* addSwing(float x, float y, float hx, float hy, float armLen, Mat mat) {
         auto* b = new Body;
         b->type = BLOCK;
@@ -519,6 +511,7 @@ public:
         PxRigidDynamic* actor = PxCreateDynamic(*physics, PxTransform(PxVec3(x, y, 0.f)),
             PxBoxGeometry(hx, hy, 0.5f), *matPx[mat], GameData::Mats[mat].density);
 
+        // Cięgno biegnie od krawędzi siedziska do punktu zawieszenia (skośnie).
         const float L = std::sqrt(hx * hx + armLen * armLen);
         const float phi = std::atan2(hx, armLen);
         for (int side = -1; side <= 1; side += 2) {
@@ -529,13 +522,14 @@ public:
             arm->setSimulationFilterData(PxFilterData(GhostGroup, 0, 0, 0));
         }
         PxRigidBodyExt::updateMassAndInertia(*actor, GameData::Mats[mat].density);
+        // Huśtawka nie może zasypiać, bo zawias do świata utrzymuje ją w ciągłym ruchu.
         actor->setSleepThreshold(0.f);
         return finish(b, actor);
     }
 
-    // Tworzy kulę (ptaka, świnię albo kulę wahadła) o promieniu radius
-    // i gęstości density. Dla ptaków ustawia BirdGroup (brak kolizji z innymi ptakami)
-    // i włącza CCD (żeby szybki ptak nie przeniknął cienkiej ściany).
+    // Tworzy kulę o promieniu radius i gęstości density (ptak, świnia albo kula wahadła).
+    // Ptaki dostają BirdGroup (brak kolizji z innymi ptakami) oraz CCD,
+    // żeby szybki ptak nie przeniknął przez cienką przeszkodę.
     Body* addBall(float x, float y, float radius, float density, Type type, Mat mat = STONE) {
         auto* b = new Body;
         b->type = type;
@@ -554,25 +548,24 @@ public:
         return finish(b, actor);
     }
 
-    // Przesuwa lokalny środek masy o dy w pionie i ponownie oblicza moment bezwładności.
-    // Ustawia też noShatter,
-    // bo fragmenty z przesuniętym COM zachowywałyby się dziwnie. Używane przez domino
-    // i kolumnę z balastem.
+    // Przesuwa lokalny środek masy o dy w pionie i przelicza moment bezwładności.
+    // Wyższy środek masy obniża stabilność bryły (domino, kolumna z balastem).
+    // Ciało dostaje noShatter, bo fragmenty z przesuniętym środkiem masy
+    // zachowywałyby się nienaturalnie.
     void setCom(Body* b, float dy) {
         PxVec3 com(0.f, dy, 0.f);
         PxRigidBodyExt::updateMassAndInertia(*b->actor, GameData::Mats[b->mat].density, &com);
         b->noShatter = true;
     }
 
-    // Wyszukuje ciało po identyfikatorze (używane do znalezienia
-    // ostatnio wystrzelonego ptaka przy aktywacji zdolności).
+    // Wyszukuje ciało po identyfikatorze (np. ostatnio wystrzelony ptak).
     Body* find(int id) {
         for (Body* b : bodies) if (b->id == id) return b;
         return nullptr;
     }
 
-    // Usuwa z wektora i z PhysX wszystkie ciała oznaczone jako dead.
-    // Wywoływana po kroku symulacji, żeby nie modyfikować listy w trakcie iteracji.
+    // Usuwa ze sceny i z rejestru ciała oznaczone jako dead.
+    // Wywoływana po kroku symulacji, aby nie modyfikować listy w trakcie iteracji.
     void removeDead() {
         for (auto it = bodies.begin(); it != bodies.end();) {
             Body* b = *it;
@@ -586,23 +579,20 @@ public:
         }
     }
 
-    // Dodaje czysto wizualny element tła (bez kolizji) - pozycja, wymiary, kolor.
     void addDeco(float x, float y, float hx, float hy, Color c) {
         decos.push_back({ x, y, hx, hy, c });
     }
 
-    // Tworzy migawkę bloku (pozycja, prędkości, wymiary, kąt, materiał)
-    // potrzebną do rozpadu - zapisywana przed usunięciem bloku.
+    // Zapisuje migawkę bloku potrzebną do rozpadu (przed jego usunięciem).
     Fracture makeFracture(const Body& b) {
         PxTransform t = b.actor->getGlobalPose();
         return { t.p, b.actor->getLinearVelocity(), b.actor->getAngularVelocity(),
                 b.half, angleZ(t.q), b.mat };
     }
 
-    // Dzieli blok na fragmenty (szkło 2×2, wysokie bloki 1×3,
-    // pozostałe 3×1). Fragmenty zachowują prędkość kątową bloku, a ich prędkość liniowa
-    // uwzględnia ruch obrotowy, dzięki czemu zachowany jest ruch całego rozpadającego się bloku.
-    // Obiekty z noShatter nie są rozdrabniane.
+    // Rozbija blok na fragmenty: szkło na siatkę 2x2, bloki wysokie na 1x3, pozostałe na 3x1.
+    // Środek każdego fragmentu jest obracany o kąt bloku. Prędkość liniowa fragmentu
+    // to v + omega x r, dzięki czemu zachowany jest ruch obrotowy całego bloku.
     void shatter(const Fracture& f) {
         int nx, ny;
         if (f.mat == GLASS) { nx = 2; ny = 2; }
@@ -622,27 +612,25 @@ public:
             }
     }
 
-    // Zwraca kwaternion obrotu ustawiający oś zawiasu wzdłuż osi Z świata
-    // (oś obrotu gry 2D).
+    // Obrót, który ustawia oś zawiasu PhysX (domyślnie X) wzdłuż osi Z świata,
+    // czyli osi obrotu gry 2D.
     PxQuat axisZ() { return PxQuat(-0.5f * Config::Pi, PxVec3(0.f, 1.f, 0.f)); }
 
-    // Przelicza ramkę świata na lokalną ramkę aktora (albo zwraca
-    // świat, gdy aktor to nullptr - zawias do świata).
+    // Przelicza ramkę ze świata na układ lokalny aktora
+    // (dla a == nullptr, czyli zawiasu do świata, ramka pozostaje światowa).
     PxTransform frameOn(PxRigidActor* a, const PxTransform& world) {
         return a ? a->getGlobalPose().transformInv(world) : world;
     }
 
-    // Tworzy zawias obrotowy (PxRevoluteJoint) łączący ciała a i b
-    // w punkcie p. nullptr oznacza zawias do świata (np. wahadło, huśtawka).
+    // Tworzy zawias obrotowy między ciałami a i b w punkcie p.
+    // a == nullptr oznacza zawias do świata (wahadło, huśtawka, wiatrak).
     PxRevoluteJoint* hinge(Body* a, Body* b, PxVec3 p) {
         PxTransform w(p, axisZ());
         PxRigidActor* A = a ? static_cast<PxRigidActor*>(a->actor) : nullptr;
         return PxRevoluteJointCreate(*physics, A, frameOn(A, w), b->actor, frameOn(b->actor, w));
     }
 
-    // Tworzy zawias z napędem silnikowym - silnik dąży do prędkości
-    // kątowej omega [rad/s], rozwijając moment nie większy niż maxTorque [N*m].
-    // Używane przez wiatrak.
+    // Zawias z napędem
     PxRevoluteJoint* motor(Body* b, PxVec3 p, float omega, float maxTorque) {
         PxRevoluteJoint* j = hinge(nullptr, b, p);
         j->setDriveVelocity(omega);
@@ -652,7 +640,7 @@ public:
     }
 };
 
-// Definicje stałych statycznych klasy Physics (wymagane w C++ dla constexpr PxU32).
+// Definicje wymagane w C++ dla statycznych składowych constexpr (przed C++17).
 constexpr PxU32 Physics::BirdGroup;
 constexpr PxU32 Physics::GhostGroup;
 constexpr float Physics::MinImpactSpeed;
@@ -660,13 +648,13 @@ constexpr float Physics::MinImpactSpeed;
 // Wspólna instancja systemu fizyki.
 Physics physics;
 
-// Klasa Levels: buduje konstrukcje planszy (wieżę, domek, wiatrak, domino, wahadło,
-// huśtawkę, słup z balastem) z obiektów fizycznych. Metody są statyczne, bo klasa
-// nie przechowuje stanu - każda metoda tylko tworzy ciała w globalnej fizyce.
+
+// Levels: buduje konstrukcje planszy z ciał fizycznych. Metody są statyczne,
+// bo klasa nie przechowuje stanu - tylko tworzy ciała w globalnej instancji physics.
 class Levels {
 public:
-    // Buduje wieżę z floors pięter. Dolne podpory są szklane,
-    // wyższe drewniane. Na piętrach 1 i 3 oraz na szczycie umieszcza świnie.
+    // Wieża z floors pięter: dolne podpory szklane, wyższe drewniane.
+    // Świnie stoją na piętrach 1 i 3 oraz na szczycie.
     static void buildTower(float cx, int floors) {
         constexpr float hw = 1.5f;
         for (int k = 0; k < floors; ++k) {
@@ -681,8 +669,8 @@ public:
         physics.addBall(cx, floors * 2.3f + 0.5f, 0.5f, Config::PigDensity, PIG);
     }
 
-    // Buduje domek z dwóch podpór (materiał pillarMat), dachu
-    // i dwóch świnek (na dole i na dachu).
+    // Domek: dwie podpory (materiał pillarMat), drewniany dach i dwie świnie
+    // (pod dachem i na dachu).
     static void buildHut(float cx, Mat pillarMat) {
         physics.addBox(cx - 0.9f, 0.6f, 0.2f, 0.6f, pillarMat);
         physics.addBox(cx + 0.9f, 0.6f, 0.2f, 0.6f, pillarMat);
@@ -691,9 +679,9 @@ public:
         physics.addBall(cx, 1.5f + 0.5f, 0.5f, Config::PigDensity, PIG);
     }
 
-    // Buduje wiatrak - aluminiową belkę na zawiasie z silnikiem
-    // (prędkość kątowa 1.2 rad/s, maks. moment 100 N*m). Belka zamiata wysokość
-    // 3.8-6.6 m, więc płaskie strzały są odbijane - trzeba lecieć łukiem.
+    // Wiatrak: aluminiowa belka na zawiasie z silnikiem (1.2 rad/s, maks. moment 100 N*m).
+    // Belka zamiata wysokości ok. 3.8-6.6 m, więc strzały płaskie są odbijane
+    // i trzeba celować łukiem.
     static void buildWindmill(float cx, float cy, float halfLen) {
         constexpr float AngularSpeed = 1.2f;
         constexpr float MaxTorque = 100.f;
@@ -704,9 +692,8 @@ public:
         physics.addDeco(cx, cy * 0.5f, 0.12f, cy * 0.5f, GameData::Frame);
     }
 
-    // Ustawia rząd n kamiennych kostek w odstępie spacing.
-    // setCom podnosi COM każdej kostki o pół wysokości, co zmniejsza stabilność
-    // i sprawia, że domino przewraca się łańcuchowo.
+    // Rząd n kamiennych kostek domina co spacing. setCom podnosi środek masy
+    // każdej kostki o ComShift, co zmniejsza stabilność i ułatwia reakcję łańcuchową.
     static void buildDominoes(float x0, int n, float spacing) {
         constexpr float HalfH = 0.7f;
         constexpr float ComShift = 0.5f * HalfH;
@@ -716,8 +703,8 @@ public:
         }
     }
 
-    // Buduje wahadło - links metalowych ogniw połączonych
-    // zawiasami, zakończone kamienną kulą o promieniu ballR.
+    // Wahadło: links metalowych ogniw połączonych zawiasami (pierwsze zawieszone
+    // do świata), zakończone kamienną kulą o promieniu ballR.
     static void buildPendulum(float ax, float ay, int links, float ballR) {
         const float L = 0.7f;
         Body* prev = nullptr;
@@ -732,8 +719,8 @@ public:
         physics.addDeco(ax, (ay + Config::ViewH) * 0.5f, 0.08f, (Config::ViewH - ay) * 0.5f, GameData::Frame);
     }
 
-    // Buduje huśtawkę - ruchome siedzisko zawieszone zawiasem
-    // w punkcie (cx, topY), plus dwie dekoracje ramy i świnia na siedzisku.
+    // Huśtawka: siedzisko zawieszone zawiasem w punkcie (cx, topY),
+    // dwie dekoracje ramy i świnia na siedzisku.
     static void buildSwing(float cx, float topY, float len) {
         physics.addDeco(cx, topY + 0.15f, 2.0f, 0.15f, GameData::Frame);
         physics.addDeco(cx, (topY + 0.3f + Config::ViewH) * 0.5f, 0.15f,
@@ -745,19 +732,18 @@ public:
         physics.addBall(cx, topY - len + 0.15f + 0.5f, 0.5f, Config::PigDensity, PIG);
     }
 
-    // Buduje drewnianą kolumnę z podniesionym COM
-    // (niestabilna, łatwo się przewraca) i świnią na szczycie.
+    // Drewniana kolumna z podniesionym środkiem masy (łatwo się przewraca)
+    // i świnią na szczycie.
     static void buildTopHeavyColumn(float x) {
         Body* col = physics.addBox(x, 1.5f, 0.4f, 1.5f, WOOD);
         physics.setCom(col, 0.5f);
         physics.addBall(x, 3.5f, 0.5f, Config::PigDensity, PIG);
     }
 
-    // Tworzy wszystkie konstrukcje na planszy, od lewej do prawej.
-
+    // Układ poziomu od lewej do prawej.
     static void build() {
         buildHut(11.7f, GLASS);
-        buildWindmill(15.0f, 5.2f, 1.4f);
+        buildWindmill(14.0f, 8.2f, 1.4f);
         buildDominoes(17.2f, 5, 0.8f);
         buildPendulum(19.4f, 7.6f, 4, 0.6f);
         buildTower(23.0f, 4);
@@ -766,40 +752,34 @@ public:
         buildTopHeavyColumn(30.5f);
     }
 
-    // Zwraca kolejność ptaków dostępnych w poziomie (łącznie 10 sztuk).
-
+    // Kolejność ptaków dostępnych w poziomie (10 sztuk).
     static std::vector<Kind> birdQueue() {
         return { RED, BLUE, YELLOW, BLACK, RED, YELLOW, BLACK, BLUE, RED, BLACK };
     }
 };
 
-// Klasa Graphics: rysuje kształty 2D (prostokąty, koła, linie) i zarządza
-// mapowaniem współrzędnych świata gry na piksele okna (letterbox).
+
+
+// Graphics: rysowanie prymitywów 2D  oraz mapowanie
+// współrzędnych świata gry na piksele okna z zachowaniem proporcji (letterbox).
 class Graphics {
 public:
-
+    // Rozmiar bufora ramki.
     int fbW = Config::WindowW;
-
     int fbH = Config::WindowH;
-
+    // Viewport z zachowaną proporcją świata (piksele).
     int vpX = 0;
-
     int vpY = 0;
-
     int vpW = Config::WindowW;
-
     int vpH = Config::WindowH;
-
+    // Viewport jako ułamki okna; służą do przeliczania pozycji myszy na współrzędne świata.
     float fracX = 0.f;
-
     float fracY = 0.f;
-
     float fracW = 1.f;
-
     float fracH = 1.f;
 
-    // Dopasowuje viewport do proporcji świata 32:18 (letterbox),
-    // zapisuje jego pozycję i rozmiar w oknie oraz ułamki do mapowania myszy.
+    // Dopasowuje viewport do proporcji świata 32:18 (pasy po bokach lub u góry i dołu)
+    // i zapisuje jego położenie.
     void layout(GLFWwindow* win) {
         glfwGetFramebufferSize(win, &fbW, &fbH);
         if (fbW <= 0 || fbH <= 0) return;
@@ -811,14 +791,15 @@ public:
         fracW = (float)vpW / fbW; fracH = (float)vpH / fbH;
     }
 
-    // Włącza przezroczyste mieszanie kolorów (dla efektów i tekstu).
+    // Włącza mieszanie alfa (przezroczystość efektów i tekstu).
     void init() {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
 
-    // Czyści ekran i ustawia viewport + projekcję ortograficzną
-    // (0..ViewW, 0..ViewH) - od tej chwili rysowanie używa współrzędnych świata gry.
+    // Czyści ekran (czarne pasy poza viewportem, niebo wewnątrz) i ustawia
+    // projekcję ortograficzną (0..ViewW, 0..ViewH): od tej chwili rysujemy
+    // we współrzędnych świata gry.
     void beginFrame(GLFWwindow* win) {
         (void)win;
         glDisable(GL_SCISSOR_TEST);
@@ -837,8 +818,7 @@ public:
         glLoadIdentity();
     }
 
-    // Rysuje prostokąt o środku (x, y), połowach hx/hy i kącie angle
-    // (obrót wokół Z). Używana do bloków, dekoracji i przycisków.
+    // Prostokąt o środku (x, y), połowach wymiarów hx, hy i obrocie angle [rad] wokół Z.
     void quad(float x, float y, float hx, float hy, float angle, Color c) {
         glColor4f(c.r, c.g, c.b, c.a);
         glPushMatrix();
@@ -852,7 +832,7 @@ public:
         glPopMatrix();
     }
 
-    // Rysuje koło jako wielokąt z 40 segmentów (kompatybilne z OpenGL 2.1).
+    // Koło 
     void circle(float x, float y, float radius, Color c) {
         constexpr int segments = 40;
         glColor4f(c.r, c.g, c.b, c.a);
@@ -869,7 +849,7 @@ public:
         glPopMatrix();
     }
 
-    // Rysuje odcinek jako cienki obrócony prostokąt między punktami a i b.
+    // Odcinek między a i b narysowany jako cienki obrócony prostokąt.
     void line(PxVec2 a, PxVec2 b, float thickness, Color c) {
         PxVec2 d = b - a;
         quad((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f, d.magnitude() * 0.5f, thickness,
@@ -877,38 +857,32 @@ public:
     }
 };
 
-// Wspólna instancja renderera.
 Graphics graphics;
 
-// Klasa TextRenderer: ładuje czcionkę TTF do atlasu glifów (stb_truetype) i rysuje
-// napisy na ekranie jako teksturowane czworokąty (ostre niezależnie od rozdzielczości).
+// ładuje czcionkę TTF do atlasu glifów (stb_truetype) i rysuje
+// napisy jako teksturowane czworokąty w siatce pikseli, dzięki czemu czcionka
+// pikselowa pozostaje ostra przy każdej rozdzielczości.
 class TextRenderer {
 public:
-    // Ścieżka do pliku czcionki TTF (musi być w katalogu roboczym programu).
+    // Plik czcionki musi leżeć w katalogu roboczym programu.
     const char* fontPath = "PressStart2P-Regular.ttf";
-
     const int atlasSize = 512;
-
     const float fontPx = 8.f;
-    // Struktura Range: zakres kodów Unicode (pierwszy kod i liczba znaków).
-    struct Range { int first, count; };
-    // Trzy zakresy Unicode do zapakowania: ASCII, Latin-1, Latin Extended-A.
-    const Range ranges[3] = { {0x20, 95}, {0xA0, 96}, {0x100, 128} };
 
+    // Zakres znaków Unicode (pierwszy kod i liczba znaków).
+    struct Range { int first, count; };
+    // Pakowane zakresy: ASCII, Latin-1 i Latin Extended-A (polskie znaki).
+    const Range ranges[3] = { {0x20, 95}, {0xA0, 96}, {0x100, 128} };
     const int numRanges = 3;
 
     stbtt_packedchar glyphs[3][128];
-
     GLuint texture = 0;
-
     bool ready = false;
 
-    // Zaokrągla współrzędną piksela do całkowitej wartości,
-    // żeby pikselowa czcionka była ostra (bez rozmycia).
+    // Zaokrągla do całkowitego piksela (ostrość czcionki pikselowej).
     float snap(float v) { return std::floor(v + 0.5f); }
 
-    // Wczytuje cały plik do bufora (używane do wczytania TTF).
-    // Zwraca false, gdy pliku nie ma lub jest pusty.
+    // Wczytuje cały plik do bufora. Zwraca false, gdy pliku brak lub jest pusty.
     bool readFile(const char* path, std::vector<unsigned char>& out) {
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file) return false;
@@ -919,8 +893,8 @@ public:
         return (bool)file.read(reinterpret_cast<char*>(out.data()), size);
     }
 
-    // Pakuje znaki do atlasu alfa (stb_truetype), tworzy teksturę OpenGL
-    // i ustawia flagę ready. Brak pliku czcionki nie blokuje gry - tylko napisy się nie rysują.
+    // Pakuje glify do atlasu alfa, tworzy teksturę OpenGL i ustawia flagę ready.
+    // Brak czcionki nie blokuje gry - nie są wtedy rysowane tylko napisy.
     void init() {
         std::vector<unsigned char> ttf;
         if (!readFile(fontPath, ttf)) {
@@ -937,6 +911,8 @@ public:
                 ranges[i].first, ranges[i].count, glyphs[i]))
                 std::fprintf(stderr, "Atlas pełny: zakres 0x%X\n", ranges[i].first);
         stbtt_PackEnd(&pc);
+        // Atlas jednokanałowy (alfa) rozszerzamy do RGBA z białym kolorem;
+        // faktyczny kolor tekstu nadaje glColor4f.
         std::vector<unsigned char> rgba(atlasSize * atlasSize * 4, 255);
         for (int i = 0; i < atlasSize * atlasSize; ++i)
             rgba[i * 4 + 3] = alpha[i];
@@ -952,8 +928,7 @@ public:
         ready = true;
     }
 
-    // Dekoduje jeden znak UTF-8 ze wskaźnika s (przesuwa go do przodu)
-    // i zwraca jego kod Unicode. Nieznane sekwencje zwraca jako '?'.
+    // Dekoduje jeden znak UTF-8 
     int decode(const char*& s) {
         unsigned char c = (unsigned char)*s++;
         if (c < 0x80) return c;
@@ -968,8 +943,7 @@ public:
         return '?';
     }
 
-    // Zwraca wskaźnik do zapakowanego glifu dla kodu Unicode cp,
-    // albo nullptr gdy znak nie istnieje w atlasie i nie da się go zastąpić '?'.
+   
     const stbtt_packedchar* glyph(int cp) {
         for (int i = 0; i < numRanges; ++i)
             if (cp >= ranges[i].first && cp < ranges[i].first + ranges[i].count)
@@ -977,14 +951,13 @@ public:
         return cp == '?' ? nullptr : glyph('?');
     }
 
-    // Przelicza rozmiar tekstu z jednostek świata na całkowitą liczbę pikseli
-    // (skalowanie proporcjonalne do szerokości viewportu).
+    // Przelicza rozmiar tekstu ze świata na całkowitą krotność pikseli czcionki
     int scale(float size) {
         float pixelsPerUnit = (float)graphics.vpW / Config::ViewW;
         return std::max(1, (int)std::lround(5.5f * size * pixelsPerUnit / fontPx));
     }
 
-    // Liczy szerokość napisu w jednostkach świata (do wyśrodkowania).
+    // Szerokość napisu  (do wyśrodkowania).
     float width(const char* s, float size) {
         int sc = scale(size);
         float px = 0.f;
@@ -994,8 +967,7 @@ public:
         return px / graphics.vpW * Config::ViewW;
     }
 
-    // Rysuje napis s w punkcie (x, y) o rozmiarze size i kolorze c.
-    // Używa osobnej projekcji w pikselach, żeby tekst był ostry.
+    // Rysuje napis w punkcie (x, y) świata. 
     void draw(const char* s, float x, float y, float size, Color c) {
         if (!ready) return;
         int sc = scale(size);
@@ -1033,38 +1005,29 @@ public:
         glMatrixMode(GL_MODELVIEW);
     }
 
-    // Rysuje napis wyśrodkowany w punkcie (cx, cy) - używana
-    // przez przyciski i tytuły ekranów.
+    // Rysuje napis wyśrodkowany w punkcie (cx, cy); używane przez przyciski i tytuły.
     void drawCentered(const char* s, float cx, float cy, float size, Color c) {
         float baselineShift = 3.5f * scale(size) * (Config::ViewH / (float)graphics.vpH);
         draw(s, cx - width(s, size) * 0.5f, cy - baselineShift, size, c);
     }
 };
 
-// Wspólna instancja renderera tekstu.
 TextRenderer text;
 
-// Struktura Button: pojedynczy przycisk UI - pozycja środka, wymiary, etykieta.
-// Używana przez klasę Ui do rysowania menu i ekranów końcowych.
+// przycisk interfejsu (środek, wymiary, etykieta).
 struct Button {
-
     float x;
-
     float y;
-
     float w;
-
     float h;
-
     const char* label;
 
-    // Sprawdza, czy punkt m (kursor myszy) leży wewnątrz przycisku.
+    // Czy punkt m (kursor we współrzędnych świata) leży wewnątrz przycisku.
     bool contains(PxVec2 m) const {
         return std::fabs(m.x - x) < w * 0.5f && std::fabs(m.y - y) < h * 0.5f;
     }
 
-    // Rysuje cień, ramkę, tło i etykietę przycisku. hover=true
-    // lekko rozjaśnia przycisk (efekt najechania myszą).
+    // Rysuje cień, ramkę, tło i etykietę; hover rozjaśnia przycisk.
     void draw(bool hover) const {
         float k = hover ? 1.15f : 1.f;
         graphics.quad(x + 0.12f, y - 0.12f, w * 0.5f, h * 0.5f, 0.f, { 0.f, 0.f, 0.f, 0.35f });
@@ -1075,39 +1038,27 @@ struct Button {
     }
 };
 
-// Klasa Ui: przechowuje wszystkie przyciski menu i ekranów końcowych w jednym miejscu.
+// przyciski menu głównego i ekranów końcowych.
 class Ui {
 public:
-
     const Button Play{ 16.f, 8.f, 6.f, 1.8f, "PLAY" };
-
     const Button Quit{ 16.f, 5.5f, 6.f, 1.8f, "QUIT" };
-
     const Button Retry{ 12.8f, 6.5f, 6.f, 1.8f, "RETRY" };
-
     const Button MenuRight{ 19.2f, 6.5f, 6.f, 1.8f, "MENU" };
 };
 
-// Wspólna instancja interfejsu.
 Ui ui;
 
-// Klasa Input: odczytuje stan myszy i klawiatury oraz wykrywa moment naciśnięcia
-// (a nie przytrzymania). Mapuje też kursor z pikseli okna na współrzędne świata gry.
+// stan myszy i klawiatury.
 class Input {
 public:
-
-    PxVec2 mouse;
-
-    bool lmb = false;
-
-    bool clicked = false;
-
+    PxVec2 mouse;          // pozycja kursora we współrzędnych świata
+    bool lmb = false;      // lewy przycisk myszy wciśnięty
+    bool clicked = false;  // lewy przycisk dopiero co wciśnięty (zbocze)
     bool escPressed = false;
-
     bool rPressed = false;
 
-    // Pobiera pozycję kursora i stan klawiszy, zamienia piksele na
-    // współrzędne świata (z uwzględnieniem letterboxa) i wykrywa nowe naciśnięcia.
+    // Odczytuje stan wejścia raz na klatkę.
     void poll(GLFWwindow* win) {
         double mx, my;
         int ww, wh;
@@ -1129,30 +1080,30 @@ public:
     }
 
 private:
-
     bool escPrev = false;
-
     bool rPrev = false;
 };
 
-// Klasa Game: główna logika rozgrywki - obsługa wejścia, celowanie, umiejętności
-// ptaków, symulacja, warunki końca gry i rysowanie sceny.
+
+// obsługa wejścia, celowanie i strzał, zdolności ptaków, symulacja
+// ze stałym krokiem, obrażenia, warunki końca gry oraz rysowanie sceny.
 class Game {
 public:
-    // Flaga zakończenia gry - ustawiana przez Escape lub przycisk QUIT.
+    // Ustawiane przez Escape w menu lub przycisk QUIT; kończy pętlę główną.
     bool quit = false;
 
-    // W każdej klatce najpierw obsługuje wejście, potem aktualizuje fizykę.
+    // Aktualizacja klatki: najpierw wejście, potem fizyka.
     void update(const Input& in, double frameDt) {
         handleInput(in);
         simulate(frameDt);
     }
 
-    // Rysuje scenę warstwami - tło, obiekty fizyczne, efekty, HUD i overlay.
+    // Rysuje scenę warstwami: tło, obiekty fizyczne, efekty, HUD, nakładka końcowa.
     void draw() const {
         graphics.quad(16.f, -0.5f, 20.f, 0.5f, 0.f, GameData::Ground);
         if (state == MENU) { drawMenu(); return; }
 
+        // Współczynnik interpolacji: jaka część kroku fizyki upłynęła od ostatniego kroku.
         const float alpha = (float)(accumulator / Config::Dt);
         for (const Physics::Deco& d : physics.decos)
             graphics.quad(d.x, d.y, d.hx, d.hy, 0.f, d.c);
@@ -1171,41 +1122,36 @@ public:
     }
 
 private:
-    // Aktualny stan gry (ekran menu, rozgrywka, wygrana, przegrana).
     State state = MENU;
-
     PxVec2 mouse;
-    // Kolejka ptaków do wystrzelenia w tym poziomie.
+
+    // Kolejka ptaków poziomu i indeks następnego do wystrzelenia.
     std::vector<Kind> queue;
-    // Indeks następnego ptaka w kolejce (liczba już wystrzelonych).
     size_t birdIdx = 0;
-    // Id ostatnio wystrzelonego ptaka (do aktywacji jego zdolności).
+    // Id ostatnio wystrzelonego ptaka (cel aktywacji zdolności).
     int lastBirdId = 0;
-    // Aktywne efekty wybuchu widoczne na ekranie.
     std::vector<Flash> flashes;
 
+    // Stan celowania: czy ptak jest przeciągany i gdzie znajduje się w procy.
     bool dragging = false;
-
     PxVec2 dragPos;
 
+    // Czas klatek, który nie został jeszcze zużyty na kroki fizyki.
     double accumulator = 0.0;
-
+    // Czas od startu poziomu (do fazy stabilizacji).
     float levelTime = 0.f;
-
+    // Czas od ostatniego strzału (przeładowanie, warunek przegranej).
     float sinceLaunch = 10.f;
-
+    // Liczniki opóźnień ekranów wygranej i przegranej.
     float winTimer = 0.f;
-
     float loseTimer = 0.f;
 
-    // Usuwa ciała poziomu i czyści efekty, przygotowując świat do restartu.
     void clearWorld() {
         physics.clear();
         flashes.clear();
     }
 
-    // Resetuje liczniki, buduje poziom, ustawia kolejkę ptaków
-    // i przełącza grę w tryb PLAYING.
+    // Buduje poziom od nowa, zeruje liczniki i przełącza grę w tryb PLAYING.
     void startLevel() {
         clearWorld();
         Levels::build();
@@ -1214,7 +1160,7 @@ private:
         lastBirdId = 0;
         dragging = false;
         dragPos = PxVec2(Config::AnchorX, Config::AnchorY);
-        levelTime = 1.5f;
+        levelTime = 1.0f;
         sinceLaunch = 10.f;
         winTimer = 0.f;
         loseTimer = 0.f;
@@ -1222,15 +1168,14 @@ private:
         state = PLAYING;
     }
 
-    // Czyści świat i wraca do ekranu startowego.
     void toMenu() {
         clearWorld();
         dragging = false;
         state = MENU;
     }
 
-    // Rozdziela wejście w zależności od ekranu - menu, rozgrywka,
-    // ekrany końcowe. Obsługuje Escape (wyjście), R (restart), kliknięcia przycisków.
+    // Escape (wyjście lub powrót do menu),
+    // R (restart poziomu), kliknięcia przycisków.
     void handleInput(const Input& in) {
         mouse = in.mouse;
         if (state == MENU) {
@@ -1255,16 +1200,17 @@ private:
         }
     }
 
-    // Sprawdza, czy gracz może celować - musi być ptak w kolejce,
-    // proca musi być przeładowana, a poziom musi być po fazie osiadania.
+    // Czy można teraz celować: ptak czeka w kolejce, proca jest przeładowana,
+    // a konstrukcja zakończyła stabilizację.
     bool canAim() const {
         return birdIdx < queue.size() && sinceLaunch > Config::ReloadDelay &&
             levelTime > Config::SettleTime;
     }
 
-    // Obsługuje przeciąganie ptaka na procy i strzał.
-    // Kliknięcie przy procy zaczyna przeciąganie, kliknięcie poza procą używa zdolności.
-    // Puszczenie myszy strzela, chyba że naciąg jest zbyt mały (wtedy anuluje).
+    // Celowanie i strzał. Kliknięcie przy procy rozpoczyna przeciąganie,
+    // kliknięcie gdzie indziej aktywuje zdolność ostatniego ptaka.
+    // Naciąg jest przycinany do MaxPull; puszczenie przycisku strzela,
+    // chyba że naciąg jest mniejszy od MinPull (wtedy strzał jest anulowany).
     void handleAiming(const Input& in) {
         const PxVec2 anchor(Config::AnchorX, Config::AnchorY);
         if (in.clicked && !dragging) {
@@ -1279,6 +1225,7 @@ private:
         float len = pull.magnitude();
         if (len > Config::MaxPull) pull *= Config::MaxPull / len;
         dragPos = anchor + pull;
+        // Ptak nie może zostać naciągnięty poniżej poziomu gruntu.
         dragPos.y = std::max(dragPos.y, GameData::Birds[queue[birdIdx]].radius);
 
         if (!in.lmb) {
@@ -1289,8 +1236,9 @@ private:
         }
     }
 
-    // Wylicza prędkość początkową ptaka ze wzoru sprężyny
-    // v = x * sqrt(k/m). Masę liczy z gęstości i objętości kuli (bez tworzenia ptaka).
+    // Prędkość początkowa ptaka 
+    // Kierunek wyznacza wektor od punktu naciągu do zaczepu procy.
+    // Masa liczona jest z gęstości i objętości kuli 
     PxVec2 launchVelocity(Kind k) const {
         float r = GameData::Birds[k].radius;
         float mass = Config::BirdDensity * (4.f / 3.f) * Config::Pi * r * r * r;
@@ -1298,8 +1246,8 @@ private:
         return (anchor - dragPos) * std::sqrt(Config::SlingStiffness / mass);
     }
 
-    // Tworzy ciało ptaka, nadaje mu prędkość z modelu sprężyny,
-    // zapisuje jego id (do późniejszej aktywacji zdolności) i zeruje licznik przeładowania.
+    // Tworzy ptaka w punkcie naciągu, nadaje mu prędkość 
+    // zapamiętuje jego id (dla zdolności) i rozpoczyna odliczanie przeładowania.
     void launch() {
         Kind k = queue[birdIdx++];
         Body* bird = physics.addBall(dragPos.x, dragPos.y, GameData::Birds[k].radius, Config::BirdDensity, BIRD);
@@ -1311,8 +1259,8 @@ private:
         dragging = false;
     }
 
-    // Uruchamia zdolność ostatnio wystrzelonego ptaka (raz na ptaka).
-    // Żółty - podwaja prędkość, niebieski - dzieli się na trzy, czarny - wybucha.
+    // Aktywuje zdolność ostatnio wystrzelonego ptaka (jednokrotnie):
+    // żółty przyspiesza, niebieski dzieli się na trzy, czarny wybucha.
     void useAbility() {
         Body* b = physics.find(lastBirdId);
         if (!b || b->abilityUsed) return;
@@ -1331,9 +1279,10 @@ private:
         }
     }
 
-    // Dzieli niebieskiego ptaka na trzy mniejsze. Promień dzielony
-    // przez cbrt(3), więc masa każdej kuli to 1/3 oryginału - pęd zachowany.
-    // Dwie nowe kule dostają przeciwne składowe prędkości bocznej, które się znoszą.
+    // Podział niebieskiego ptaka na trzy. Promień każdego ptaka maleje
+    // więc jego masa to 1/3 oryginału, a suma pędów jest zachowana.
+    // Dwa nowe ptaki dostają przeciwne składowe prędkości prostopadłej do toru,
+    // które się znoszą (pęd całkowity pozostaje bez zmian).
     void split(Body& b) {
         PxVec3 p = b.actor->getGlobalPose().p;
         PxVec3 v = b.actor->getLinearVelocity();
@@ -1358,9 +1307,11 @@ private:
         }
     }
 
-    // Wybuch czarnego ptaka - impuls J maleje liniowo z odległością
-    // (od BombImpulse w epicentrum do 0 na BombRadius). Cięższe ciała odrzucane słabiej.
-    // Sam ptak jest oznaczany do usunięcia, a w miejscu wybuchu pojawia się błysk.
+    // Wybuch czarnego ptaka. 
+    // cięższe ciała są odrzucane slabiej
+    // Impuls wybuchu trafia też do licznika
+    // obrażeń, dzięki czemu wybuch może niszczyć bloki i świnie.
+    // Sam ptak jest usuwany, a w miejscu wybuchu pojawia się błysk.
     void explode(Body& bomb) {
         PxVec3 p = bomb.actor->getGlobalPose().p;
         for (Body* o : physics.bodies) {
@@ -1380,8 +1331,7 @@ private:
         bomb.dead = true;
     }
 
-    // Zamienia czas klatki na stałe kroki PhysX (accumulator),
-    // żeby fizyka nie zależała od FPS. Po każdym kroku aktualizuje logikę gry.
+    // Pętla ze stałym krokiem
     void simulate(double frameDt) {
         if (state == MENU) { accumulator = 0.0; return; }
         accumulator += frameDt;
@@ -1397,9 +1347,13 @@ private:
         }
     }
 
-    // Porównuje zebrane impulsy z progami materiałów
-    // (świnia ginie powyżej PigDeathImpulse, blok rozpada się powyżej breakImpulse).
-    // Podczas stabilizacji konstrukcji obrażenia są wyłączone. Usuwa też ptaki starsze niż BirdLifetime.
+    // Model obrażeń: porównuje impuls zebrany w kroku z progami.
+    // Świnia ginie powyżej PigDeathImpulse, blok rozpada się powyżej breakImpulse
+    // swojego materiału (fragmenty i ciała noShatter po prostu znikają).
+    // W fazie stabilizacji obrażenia są wyłączone. Usuwane są też ptaki starsze
+    // niż BirdLifetime oraz ciała, które opuściły planszę. Na końcu licznik impulsu
+    // jest zerowany; rozpady wykonywane są po pętli, żeby nie modyfikować listy ciał
+    // podczas iteracji.
     void applyDamageRules() {
         const bool settling = levelTime < Config::SettleTime;
         std::vector<Fracture> toBreak;
@@ -1432,7 +1386,7 @@ private:
             physics.shatter(f);
     }
 
-    // Aktualizuje czas wyświetlania błysków i usuwa zakończone efekty.
+    // Postęp animacji błysków
     void updateFlashes() {
         for (Flash& f : flashes) f.t += Config::Dt;
         flashes.erase(std::remove_if(flashes.begin(), flashes.end(),
@@ -1440,7 +1394,6 @@ private:
             flashes.end());
     }
 
-    // Zwraca liczbę świń, które nadal pozostają w grze.
     int pigsAlive() const {
         int pigs = 0;
         for (const Body* b : physics.bodies)
@@ -1448,8 +1401,8 @@ private:
         return pigs;
     }
 
-    // Sprawdza, czy jakikolwiek ptak wciąż się porusza
-    // (liniowo lub kątowo) - używane do przegranej (trzeba poczekać, aż lot się skończy).
+    // Czy jakikolwiek ptak jeszcze się porusza 
+    // Przegrana jest ogłaszana dopiero, gdy wszystkie ptaki się zatrzymają.
     bool birdInFlight() const {
         for (const Body* b : physics.bodies) {
             if (b->type != BIRD || b->dead) continue;
@@ -1459,8 +1412,11 @@ private:
         return false;
     }
 
-    // Sprawdza warunki wygranej (brak świń) i przegranej
-    // (skończyły się ptaki i nic już nie lata).
+    // Warunki końca gry.
+    // Wygrana: brak żywych świń 
+    // Przegrana: kolejka ptaków pusta i żaden ptak się nie rusza 
+    // albo upłynął twardy limit LoseHardTimeout od ostatniego strzału
+    // (zabezpieczenie przed ptakiem, który nigdy całkiem nie znieruchomieje).
     void checkEnd() {
         if (state != PLAYING) return;
         if (pigsAlive() == 0) {
@@ -1480,8 +1436,9 @@ private:
         else loseTimer = 0.f;
     }
 
-    // Rysuje ptaka danego rodzaju pod obróconym kątem
-    // (ciało, oko, źrenica).
+    // --- Rysowanie ---
+
+    // Ptak obrócony o angle: ciało, oko i źrenica obracane razem z ciałem.
     static void drawBirdRotated(Kind k, float x, float y, float r, float angle) {
         float c = std::cos(angle), s = std::sin(angle);
         graphics.circle(x, y, r, GameData::Birds[k].color);
@@ -1489,26 +1446,27 @@ private:
         graphics.circle(ex, ey, r * 0.28f, GameData::White);
         graphics.circle(ex + r * 0.05f * c, ey + r * 0.05f * s, r * 0.13f, GameData::Black);
     }
-    // Rysuje ptaka bez obrotu (skrót do drawBirdRotated z angle=0).
+
     static void drawBird(Kind k, float x, float y, float r) {
         drawBirdRotated(k, x, y, r, 0.f);
     }
-    // Rysuje świnię (koło, dwoje oczu) pod obróconym kątem.
+
     static void drawPig(float x, float y, float r, float angle) {
         float c = std::cos(angle), s = std::sin(angle);
         graphics.circle(x, y, r, GameData::Pig);
         graphics.circle(x - 0.2f * c, y - 0.2f * s, r * 0.18f, GameData::White);
         graphics.circle(x + 0.2f * c, y + 0.2f * s, r * 0.18f, GameData::White);
     }
-    // Rysuje kulę (np. kulę wahadła) z ciemniejszym punktem orientacyjnym.
+
+    // Kula wahadła z ciemniejszym znacznikiem, który pokazuje jej obrót.
     static void drawBall(const Body& b, float x, float y, float a) {
         Color c = GameData::Mats[b.mat].color;
         graphics.circle(x, y, b.radius, c);
         graphics.circle(x + 0.5f * b.radius * std::cos(a), y + 0.5f * b.radius * std::sin(a),
             b.radius * 0.22f, { c.r * 0.5f, c.g * 0.5f, c.b * 0.5f });
     }
-    // Rysuje ciało według typu - blok (quad + cięgna huśtawki),
-    // świnia (drawPig), ptak (drawBirdRotated) albo kula (drawBall).
+
+    // Rysuje ciało według typu, w pozie interpolowanej współczynnikiem alpha.
     static void drawBody(const Body& b, float alpha) {
         Pose p = b.pose(alpha);
         switch (b.type) {
@@ -1532,12 +1490,11 @@ private:
         }
     }
 
-    // Rysuje podstawę procy (drewniany słupek).
     static void drawSling() {
         graphics.quad(Config::AnchorX, 1.5f, 0.2f, 1.7f, 0.f, GameData::Sling);
     }
 
-    // Rysuje aktywne błyski wybuchów jako stopniowo zanikające koła.
+    // Błyski wybuchów: rozszerzające się, zanikające koła.
     void drawExplosions() const {
         for (const Flash& f : flashes) {
             float k = f.t / Config::FlashTime;
@@ -1547,8 +1504,9 @@ private:
         }
     }
 
-    // Rysuje ptaka na procy - gdy przeciągany, pokazuje cięciwę
-    // i tor lotu (kropki), a gdy proca gotowa, pokazuje ptaka w spoczynku.
+    // Ptak na procy. Podczas przeciągania rysuje cięciwę i przewidywany tor lotu
+    // (punkty wg wzoru rzutu ukośnego, zanikające z czasem); gdy proca jest
+    // gotowa, rysuje ptaka w spoczynku.
     void drawActiveBird() const {
         if (state != PLAYING || birdIdx >= queue.size()) return;
         Kind k = queue[birdIdx];
@@ -1577,7 +1535,7 @@ private:
         }
     }
 
-    // Rysuje pozostałe ptaki jako małe ikony w lewym dolnym rogu.
+    // Pozostałe ptaki jako małe ikony w lewym dolnym rogu.
     void drawQueue() const {
         if (state != PLAYING) return;
         for (size_t i = birdIdx + 1, n = 0; i < queue.size(); ++i, ++n) {
@@ -1589,7 +1547,7 @@ private:
         }
     }
 
-    // Wyświetla liczbę pozostałych ptaków i świń.
+    // Licznik pozostałych ptaków i świń.
     void drawHud() const {
         if (state != PLAYING) return;
         char buf[96];
@@ -1598,7 +1556,6 @@ private:
         text.draw(buf, 0.5f, 16.6f, 0.14f, GameData::Hud);
     }
 
-    // Rysuje ekran startowy z tytułem, ptakami i przyciskami.
     void drawMenu() const {
         text.drawCentered("ANGRY BIRDS", 16.f + 0.15f, 13.5f - 0.15f, 0.3f, GameData::Black);
         text.drawCentered("ANGRY BIRDS", 16.f, 13.5f, 0.3f, { 0.9f, 0.25f, 0.15f });
@@ -1608,8 +1565,7 @@ private:
         ui.Quit.draw(ui.Quit.contains(mouse));
     }
 
-    // Rysuje przyciemnione tło + napis wyniku + przyciski
-    // RETRY/MENU na ekranach wygranej i przegranej.
+    // Przyciemnienie sceny, napis wyniku i przyciski RETRY / MENU.
     void drawOverlay() const {
         graphics.quad(16.f, 9.f, 16.f, 9.f, 0.f, { 0.f, 0.f, 0.f, 0.45f });
         auto button = [&](const Button& b) { b.draw(b.contains(mouse)); };
@@ -1623,6 +1579,7 @@ private:
 };
 
 
+
 int main() {
     glfwSetErrorCallback([](int code, const char* msg) {
         std::fprintf(stderr, "GLFW error %d: %s\n", code, msg);
@@ -1630,6 +1587,7 @@ int main() {
     if (!glfwInit())
         return -1;
 
+   
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
     GLFWwindow* window = glfwCreateWindow(Config::WindowW, Config::WindowH,
@@ -1664,6 +1622,7 @@ int main() {
         graphics.layout(window);
         input.poll(window);
 
+        
         double now = glfwGetTime();
         game.update(input, std::min(now - prevTime, 0.1));
         prevTime = now;
